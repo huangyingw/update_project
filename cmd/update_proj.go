@@ -3,8 +3,6 @@ package cmd
 import (
 	"fmt"
 	"os"
-	"path/filepath"
-
 	"projupdater/utils"
 )
 
