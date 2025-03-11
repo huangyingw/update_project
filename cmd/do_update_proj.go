@@ -1,13 +1,14 @@
 package cmd
 
 import (
+	"fmt"
 	"projupdater/tasks"
 	"sync"
 )
 
 func DoUpdateProj() error {
 	var wg sync.WaitGroup
-	errChan := make(chan error, 4)
+	errChan := make(chan error, 3)
 
 	wg.Add(1)
 	go func() {
@@ -28,14 +29,6 @@ func DoUpdateProj() error {
 	wg.Add(1)
 	go func() {
 		defer wg.Done()
-		if err := tasks.RunCscope(); err != nil {
-			errChan <- err
-		}
-	}()
-
-	wg.Add(1)
-	go func() {
-		defer wg.Done()
 		if err := tasks.GitRemoteUpdate(); err != nil {
 			errChan <- err
 		}
@@ -48,6 +41,11 @@ func DoUpdateProj() error {
 		if err != nil {
 			return err
 		}
+	}
+
+	fmt.Println("开始更新cscope索引...")
+	if err := tasks.RunCscope(); err != nil {
+		return fmt.Errorf("更新cscope索引失败: %w", err)
 	}
 
 	return nil

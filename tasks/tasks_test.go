@@ -36,18 +36,50 @@ func TestGenerateRsyncFiles(t *testing.T) {
 }
 
 func TestRunCscope(t *testing.T) {
+	// 确保测试前清理可能存在的锁文件
+	os.Remove(cscopeLockFile)
+
+	// 清理可能存在的临时文件
+	cleanupFiles := []string{
+		"files.proj", "cscope.out", "cscope.in.out", "cscope.po.out",
+		"cscopesourcefile.bak", "cscopesourcefile.bak.bak",
+		"cscope.out.bak", "cscope.out.bak.in", "cscope.out.bak.po",
+		"cscope.out.tmp", "cscope.in.out.tmp", "cscope.po.out.tmp",
+	}
+
+	for _, file := range cleanupFiles {
+		os.Remove(file)
+	}
+
+	// 创建临时文件用于测试
+	testfile := "testfile.go"
+	err := os.WriteFile(testfile, []byte("package main\n\nfunc main() {\n}\n"), 0644)
+	if err != nil {
+		t.Fatalf("Failed to create test file: %v", err)
+	}
+	defer os.Remove(testfile)
+
 	// 创建临时的 files.proj
-	err := os.WriteFile("files.proj", []byte("\"testfile.go\"\n"), 0644)
+	err = os.WriteFile("files.proj", []byte("\""+testfile+"\"\n"), 0644)
 	if err != nil {
 		t.Fatalf("Failed to create files.proj: %v", err)
 	}
-	defer os.Remove("files.proj")
-	defer os.Remove("cscope.out")
-	defer os.Remove("cscope.in.out")
-	defer os.Remove("cscope.po.out")
+
+	// 确保清理所有临时文件
+	defer func() {
+		for _, file := range cleanupFiles {
+			os.Remove(file)
+		}
+		os.Remove(cscopeLockFile)
+	}()
 
 	err = RunCscope()
 	if err != nil {
 		t.Errorf("RunCscope error: %v", err)
+	}
+
+	// 验证文件是否正确生成
+	if _, err := os.Stat("cscope.out"); os.IsNotExist(err) {
+		t.Errorf("cscope.out 文件未生成")
 	}
 }
