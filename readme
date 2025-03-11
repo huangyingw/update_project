@@ -1,3 +1,42 @@
-上面是我的代码.
-./utils/copy_file.go, 这个文件需要吗？
-帮我检查一下各个代码, 尽量减少临时文件的使用.
+这个项目的目的, 是用go来重新实现 /Users/huangyingw/Dropbox/loadrc/bashrc/update_proj.sh
+我的需求是, 同一时刻只能有一个进程在运行.
+重点是cscope.sh 部分, 我希望在更新cscope index的时候, 不影响cscope searh的正常使用.
+帮我检查并做必要的修改, 修改完之后, 在当前项目路径分别运行update_proj.sh, 和go程序, 看看它们生成的 ./files.proj 是否完全相同.
+如果不同就修改.
+然后修改 ./main.go.sh , 让它先编译, 然后再在当前文件夹运行编译后的go程序.
+
+现在还有单元测试错误,
+我的需求是, 同一时刻只能有一个进程在运行.
+重点是cscope.sh 部分, 我希望在更新cscope index的时候, 不影响cscope searh的正常使用.
+修改完之后, 
+
+这个项目的目的, 是用go来重新实现 /Users/huangyingw/Dropbox/loadrc/bashrc/update_proj.sh
+在当前项目路径分别运行update_proj.sh, 和go程序, 看看它们生成的 ./files.proj ./rsync.files 是否完全相同
+
+下面的代码不对, 不能硬编码
+	// 确保包含main.gdio.diff文件
+	hasMainGdioDiff := false
+	for _, file := range files {
+		if file == "./main.gdio.diff" {
+			hasMainGdioDiff = true
+			break
+		}
+	}
+	if !hasMainGdioDiff {
+		files = append(files, "./main.gdio.diff")
+	}
+
+	// 过滤掉update_proj和update_proj.log文件
+	var filteredFiles []string
+	for _, file := range files {
+		if file != "./update_proj" && file != "./update_proj.log" {
+			filteredFiles = append(filteredFiles, file)
+		}
+	}
+
+脚本是这么处理的:
+# 后处理
+current_branch=$(~/loadrc/gitrc/get_current_branch.sh)
+echo "\"./${current_branch}.gdio.diff\"" > "$TEMP_TARGET.tmp"
+               
+ ./rsync.files 差异可以忽略.
