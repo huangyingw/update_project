@@ -1,4 +1,5 @@
 "./.gitconfig"
+"./.gitignore"
 "./cmd/do_update_proj.go"
 "./cmd/root.go"
 "./cmd/update_proj.go"
