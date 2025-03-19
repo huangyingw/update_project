@@ -5,32 +5,11 @@ import (
 	"io"
 	"os"
 	"os/exec"
-	"path/filepath"
 	"strings"
-	"syscall"
+	"sync"
 )
 
-var cscopeLockFile = filepath.Join(os.TempDir(), "cscope_update.lck")
-
 func RunCscope() error {
-	// 使用文件锁确保只有一个进程在更新cscope索引
-	lockFile, err := os.OpenFile(cscopeLockFile, os.O_CREATE|os.O_RDWR, 0666)
-	if err != nil {
-		return fmt.Errorf("无法创建cscope锁文件: %w", err)
-	}
-	defer lockFile.Close()
-	defer os.Remove(cscopeLockFile)
-
-	// 尝试获取文件锁，非阻塞模式
-	err = syscall.Flock(int(lockFile.Fd()), syscall.LOCK_EX|syscall.LOCK_NB)
-	if err != nil {
-		if err == syscall.EWOULDBLOCK {
-			return fmt.Errorf("另一个进程正在更新cscope索引")
-		}
-		return fmt.Errorf("获取cscope锁失败: %w", err)
-	}
-	defer syscall.Flock(int(lockFile.Fd()), syscall.LOCK_UN)
-
 	sourceFile := "cscopesourcefile.bak"
 	tempCscopeOut := "cscope.out.bak"
 	tempCscopeIn := "cscope.out.bak.in"
@@ -47,20 +26,14 @@ func RunCscope() error {
 	// 确保在函数退出时执行清理
 	defer cleanup()
 
-	// 复制 files.proj
-	err = copyFile("files.proj", sourceFile)
+	// 复制 files.proj 并处理特殊字符 - 这两步合并成一个操作提高性能
+	err := copyFileAndReplace("files.proj", sourceFile, `\\ `, ` `)
 	if err != nil {
-		return fmt.Errorf("复制文件失败: %w", err)
+		return fmt.Errorf("复制并处理文件失败: %w", err)
 	}
 
-	// 替换特殊字符
-	err = replaceInFile(sourceFile, `\\ `, ` `)
-	if err != nil {
-		return fmt.Errorf("替换文件内容失败: %w", err)
-	}
-
-	// 运行 cscope 生成临时索引文件
-	cmd := exec.Command("cscope", "-bq", "-i", sourceFile, "-f", tempCscopeOut)
+	// 运行 cscope 生成临时索引文件，使用-k选项以提高性能
+	cmd := exec.Command("cscope", "-bkq", "-i", sourceFile, "-f", tempCscopeOut)
 	output, err := cmd.CombinedOutput()
 	if err != nil {
 		return fmt.Errorf("cscope 命令执行失败: %w, 输出: %s", err, string(output))
@@ -73,22 +46,46 @@ func RunCscope() error {
 		return fmt.Errorf("临时索引文件未生成: %s", tempCscopeOut)
 	}
 
-	// 原子地替换索引文件以不影响搜索
-	if err := safeReplaceFile(tempCscopeOut, "cscope.out"); err != nil {
-		return fmt.Errorf("替换cscope.out失败: %w", err)
-	}
+	// 并行替换所有cscope文件
+	var wg sync.WaitGroup
+	errChan := make(chan error, 3)
+
+	// 替换主索引文件
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		if err := safeReplaceFile(tempCscopeOut, "cscope.out"); err != nil {
+			errChan <- fmt.Errorf("替换cscope.out失败: %w", err)
+		}
+	}()
 
 	// 检查并替换其他cscope文件（如果存在）
 	if _, err := os.Stat(tempCscopeIn); !os.IsNotExist(err) {
-		if err := safeReplaceFile(tempCscopeIn, "cscope.in.out"); err != nil {
-			return fmt.Errorf("替换cscope.in.out失败: %w", err)
-		}
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			if err := safeReplaceFile(tempCscopeIn, "cscope.in.out"); err != nil {
+				errChan <- fmt.Errorf("替换cscope.in.out失败: %w", err)
+			}
+		}()
 	}
 
 	if _, err := os.Stat(tempCscopePo); !os.IsNotExist(err) {
-		if err := safeReplaceFile(tempCscopePo, "cscope.po.out"); err != nil {
-			return fmt.Errorf("替换cscope.po.out失败: %w", err)
-		}
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			if err := safeReplaceFile(tempCscopePo, "cscope.po.out"); err != nil {
+				errChan <- fmt.Errorf("替换cscope.po.out失败: %w", err)
+			}
+		}()
+	}
+
+	wg.Wait()
+	close(errChan)
+
+	// 检查是否有错误
+	for err := range errChan {
+		return err // 返回第一个遇到的错误
 	}
 
 	fmt.Println("成功更新 cscope 索引文件")
@@ -128,7 +125,9 @@ func safeReplaceFile(src, dst string) error {
 		}
 	}()
 
-	_, err = io.Copy(dstFile, srcFile)
+	// 使用较大的缓冲区提高复制性能
+	buf := make([]byte, 1024*1024) // 1MB缓冲区
+	_, err = io.CopyBuffer(dstFile, srcFile, buf)
 	if err != nil {
 		os.Remove(tempDst) // 清理临时文件
 		return err
@@ -151,6 +150,21 @@ func safeReplaceFile(src, dst string) error {
 	return os.Rename(tempDst, dst)
 }
 
+// 复制文件并替换内容 - 合并两个操作提高性能
+func copyFileAndReplace(src, dst, oldStr, newStr string) error {
+	input, err := os.ReadFile(src)
+	if err != nil {
+		return err
+	}
+
+	// 替换内容
+	output := strings.ReplaceAll(string(input), oldStr, newStr)
+
+	// 写入到目标文件
+	return os.WriteFile(dst, []byte(output), 0644)
+}
+
+// 保留旧的copyFile和replaceInFile函数以兼容其他可能调用它们的代码
 func copyFile(src, dst string) error {
 	input, err := os.ReadFile(src)
 	if err != nil {

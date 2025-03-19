@@ -36,9 +36,6 @@ func TestGenerateRsyncFiles(t *testing.T) {
 }
 
 func TestRunCscope(t *testing.T) {
-	// 确保测试前清理可能存在的锁文件
-	os.Remove(cscopeLockFile)
-
 	// 清理可能存在的临时文件
 	cleanupFiles := []string{
 		"files.proj", "cscope.out", "cscope.in.out", "cscope.po.out",
@@ -70,7 +67,6 @@ func TestRunCscope(t *testing.T) {
 		for _, file := range cleanupFiles {
 			os.Remove(file)
 		}
-		os.Remove(cscopeLockFile)
 	}()
 
 	err = RunCscope()
