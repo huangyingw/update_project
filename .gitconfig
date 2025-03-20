@@ -1,0 +1,11 @@
+[deploy]
+    host = localhost
+    path = ~/loadrc/update_project
+[remote "origin"]
+    url = git@github.com:huangyingw/update_project.git
+    fetch = +refs/heads/*:refs/remotes/origin/*
+[push]
+    remote = origin
+[gsync]
+    remote = origin
+    target = 0af2bc72d5c24a84bec40658ce5d852830fa339f
