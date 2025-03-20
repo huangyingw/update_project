@@ -1,7 +1,6 @@
 package tasks
 
 import (
-	"bufio"
 	"fmt"
 	"io/ioutil"
 	"os"
@@ -113,7 +112,6 @@ func GenerateFileIndex() error {
 	findWg.Add(2)
 	go func() {
 		defer findWg.Done()
-		// 优化find命令：增加-print0和使用xargs执行grep以提高性能
 		cmd1 := buildOptimizedFindCommand(pruneSuffixes, false, tempFile.Name(), errFile.Name())
 		fmt.Println("执行命令1:", cmd1)
 		findCmd1 := exec.Command("sh", "-c", cmd1)
@@ -140,66 +138,86 @@ func GenerateFileIndex() error {
 		fmt.Printf("警告：%v\n", err)
 	}
 
-	// 重新读取临时文件中的内容
-	fileContent, err := ioutil.ReadFile(tempFile.Name())
-	if err != nil {
-		return err
-	}
-	files := strings.Split(string(fileContent), "\n")
-
-	// 过滤pruneFiles中的文件
-	files = filterFiles(files, pruneFiles)
-
-	// 根据后缀过滤文件 - 明确过滤掉*.bak文件
-	// 这一步在Linux和macOS上都能工作，兼容原始bash脚本的处理逻辑
-	filteredFiles := []string{}
-	for _, file := range files {
-		skip := false
-		
-		// 检查文件是否有后缀匹配要排除的后缀
-		for _, suffix := range pruneSuffixes {
-			// 处理通配符模式
-			if strings.HasPrefix(suffix, "*.") {
-				// 从"*.bak"提取".bak"
-				ext := suffix[1:]
-				if strings.HasSuffix(file, ext) {
-					skip = true
-					break
-				}
-			} else if strings.HasPrefix(file, suffix) || file == suffix {
-				// 处理精确路径匹配
-				skip = true
-				break
-			}
-		}
-		
-		if !skip && file != "./update_proj" && file != "./update_proj.log" {
-			filteredFiles = append(filteredFiles, file)
-		}
-	}
-	files = filteredFiles
-
-	files = uniqueStrings(files)
-	sort.Strings(files)
-
-	// 创建新的临时文件来写入最终结果
+	// 创建处理后的临时文件
 	finalTempFile, err := ioutil.TempFile("", "files.proj.*.final")
 	if err != nil {
 		return err
 	}
 	defer os.Remove(finalTempFile.Name())
-
-	// 写入最终文件
-	for _, file := range files {
-		if file != "" {
-			fmt.Fprintf(finalTempFile, "\"%s\"\n", file)
+	
+	// 读取临时文件，排序并去重
+	fileBytes, err := ioutil.ReadFile(tempFile.Name())
+	if err != nil {
+		return err
+	}
+	
+	// 处理文件路径 - 与bash脚本保持一致
+	fileLines := strings.Split(string(fileBytes), "\n")
+	var processedLines []string
+	
+	for _, line := range fileLines {
+		if line == "" {
+			continue
+		}
+		// 去除开头的 ./
+		line = strings.TrimPrefix(line, "./")
+		// 添加 "./ 前缀和 " 后缀
+		if !strings.HasPrefix(line, "\"./") {
+			line = "\"./"+line+"\""
+		}
+		processedLines = append(processedLines, line)
+	}
+	
+	// 对行进行排序并去重
+	sort.Strings(processedLines)
+	processedLines = uniqueStrings(processedLines)
+	
+	// 读取 prunefile.conf 并进行文件排除
+	pruneFileMap := make(map[string]struct{})
+	for _, file := range pruneFiles {
+		pruneFileMap[file] = struct{}{}
+	}
+	
+	// 将处理后的行写入临时文件
+	for _, line := range processedLines {
+		// 跳过空行和以 "../." 开头的条目
+		if line == "" || strings.HasPrefix(line, "\"../.") {
+			continue
+		}
+		
+		// 确保格式一致，将 "." 替换为 "./"
+		if line == "\"." {
+			line = "\"./\""
+		}
+		
+		// 检查是否在排除列表中
+		_, excluded := pruneFileMap[line]
+		if !excluded {
+			fmt.Fprintln(finalTempFile, line)
 		}
 	}
+	
 	finalTempFile.Close()
-
+	
+	// 验证生成的文件不为空
+	fi, err := os.Stat(finalTempFile.Name())
+	if err != nil || fi.Size() == 0 {
+		return fmt.Errorf("生成的文件为空")
+	}
+	
+	// 检查文件是否有变化
+	diffCmd := exec.Command("diff", "-q", finalTempFile.Name(), filesProjPath)
+	if diffCmd.Run() == nil {
+		fmt.Println("files.proj 没有变化，保留原文件")
+		return nil
+	}
+	
 	// 替换原有的 files.proj
-	err = os.Rename(finalTempFile.Name(), filesProjPath)
-	if err != nil {
+	tempNewFile := filesProjPath + ".new"
+	if err := utils.CopyFile(finalTempFile.Name(), tempNewFile); err != nil {
+		return err
+	}
+	if err := os.Rename(tempNewFile, filesProjPath); err != nil {
 		// 恢复备份
 		utils.CopyFile(backupPath, filesProjPath)
 		return err
@@ -232,7 +250,7 @@ func buildOptimizedFindCommand(patterns []string, isInclude bool, outputFile, er
 				if i > 0 {
 					cmd.WriteString("-o ")
 				}
-				// 统一使用-wholename参数
+				// 统一使用-wholename参数，与bash脚本保持一致
 				cmd.WriteString(fmt.Sprintf("-wholename '%s' ", pattern))
 			}
 			cmd.WriteString("\\) ")
@@ -257,15 +275,16 @@ func buildOptimizedFindCommand(patterns []string, isInclude bool, outputFile, er
 			}
 			
 			// 使用-prune来排除这些模式，再使用-o来包含其他文件
-			cmd.WriteString("\\) -prune -o ")
+			cmd.WriteString("\\) -a -prune -o ")
 		}
 		
 		// 添加常规文件查找
-		cmd.WriteString("-type f -size +0 ")
+		cmd.WriteString("-size +0 -type f ")
 	}
 	
 	// 使用grep过滤文本文件 - 与bash脚本保持一致
-	cmd.WriteString("-exec grep -Il \"\" {} \\; 2>>")
+	// 使用 + 而不是 \; 来提高性能
+	cmd.WriteString("-exec grep -Il \"\" {} + 2>>")
 	cmd.WriteString(errorFile)
 	
 	// 添加输出重定向
@@ -280,45 +299,41 @@ func buildOptimizedFindCommand(patterns []string, isInclude bool, outputFile, er
 
 func readConfig(filename string) ([]string, error) {
 	var lines []string
-	file, err := os.Open(filename)
+	
+	// 先检查文件是否存在
+	if _, err := os.Stat(filename); os.IsNotExist(err) {
+		return lines, nil
+	}
+	
+	// 读取文件内容
+	content, err := ioutil.ReadFile(filename)
 	if err != nil {
-		if os.IsNotExist(err) {
-			return lines, nil
-		}
 		return nil, err
 	}
-	defer file.Close()
-
-	scanner := bufio.NewScanner(file)
-	for scanner.Scan() {
-		line := strings.TrimSpace(scanner.Text())
+	
+	// 处理文件内容
+	fileLines := strings.Split(string(content), "\n")
+	for _, line := range fileLines {
+		line = strings.TrimSpace(line)
 		if line != "" && !strings.HasPrefix(line, "#") {
 			lines = append(lines, line)
 		}
 	}
-	return lines, scanner.Err()
-}
-
-func filterFiles(files, pruneFiles []string) []string {
-	pruneMap := make(map[string]struct{})
-	for _, file := range pruneFiles {
-		pruneMap[file] = struct{}{}
-	}
-	var result []string
-	for _, file := range files {
-		if _, found := pruneMap[file]; !found {
-			result = append(result, file)
-		}
-	}
-	return result
+	
+	return lines, nil
 }
 
 func uniqueStrings(input []string) []string {
-	uniqueMap := make(map[string]struct{})
+	// 对于大量数据，使用map比循环检查更高效
+	seen := make(map[string]struct{}, len(input))
 	var result []string
+	
 	for _, str := range input {
-		if _, found := uniqueMap[str]; !found {
-			uniqueMap[str] = struct{}{}
+		if str == "" {
+			continue
+		}
+		if _, found := seen[str]; !found {
+			seen[str] = struct{}{}
 			result = append(result, str)
 		}
 	}
@@ -326,22 +341,43 @@ func uniqueStrings(input []string) []string {
 }
 
 func appendUniqueLine(filePath, line string) error {
-	// 检查是否已存在
-	file, err := os.OpenFile(filePath, os.O_RDWR|os.O_CREATE, 0644)
+	// 先检查文件是否存在，如果不存在则创建
+	if _, err := os.Stat(filePath); os.IsNotExist(err) {
+		// 创建目录（如果需要）
+		if err := os.MkdirAll(filepath.Dir(filePath), 0755); err != nil {
+			return err
+		}
+		// 创建文件并写入行
+		return ioutil.WriteFile(filePath, []byte(line+"\n"), 0644)
+	}
+	
+	// 读取整个文件
+	content, err := ioutil.ReadFile(filePath)
 	if err != nil {
 		return err
 	}
-	defer file.Close()
-
-	scanner := bufio.NewScanner(file)
-	for scanner.Scan() {
-		if scanner.Text() == line {
-			return nil
+	
+	// 检查行是否已存在
+	lines := strings.Split(string(content), "\n")
+	for _, existingLine := range lines {
+		if existingLine == line {
+			return nil // 行已存在，不需要添加
 		}
 	}
-
+	
 	// 追加新行
-	_, err = file.WriteString(line + "\n")
-	return err
+	lines = append(lines, line)
+	
+	// 去除空行并排序
+	var nonEmptyLines []string
+	for _, l := range lines {
+		if l != "" {
+			nonEmptyLines = append(nonEmptyLines, l)
+		}
+	}
+	sort.Strings(nonEmptyLines)
+	
+	// 写回文件
+	return ioutil.WriteFile(filePath, []byte(strings.Join(nonEmptyLines, "\n")+"\n"), 0644)
 }
 
