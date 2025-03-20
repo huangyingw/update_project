@@ -1,5 +1,8 @@
 .PHONY: build clean run test
 
+# 获取当前系统类型
+UNAME := $(shell uname | tr '[:upper:]' '[:lower:]')
+
 # 默认目标
 all: clean build
 
@@ -17,7 +20,7 @@ dev:
 
 # 带优化的编译
 release:
-	CGO_ENABLED=0 GOOS=darwin GOARCH=amd64 go build -o update_proj -ldflags="-s -w" -trimpath
+	CGO_ENABLED=0 GOOS=$(UNAME) GOARCH=amd64 go build -o update_proj -ldflags="-s -w" -trimpath
 
 # 清理目标
 clean:
