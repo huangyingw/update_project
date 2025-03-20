@@ -150,10 +150,30 @@ func GenerateFileIndex() error {
 	// 过滤pruneFiles中的文件
 	files = filterFiles(files, pruneFiles)
 
-	// 过滤掉update_proj和update_proj.log文件
-	var filteredFiles []string
+	// 根据后缀过滤文件 - 明确过滤掉*.bak文件
+	// 这一步在Linux和macOS上都能工作，兼容原始bash脚本的处理逻辑
+	filteredFiles := []string{}
 	for _, file := range files {
-		if file != "./update_proj" && file != "./update_proj.log" {
+		skip := false
+		
+		// 检查文件是否有后缀匹配要排除的后缀
+		for _, suffix := range pruneSuffixes {
+			// 处理通配符模式
+			if strings.HasPrefix(suffix, "*.") {
+				// 从"*.bak"提取".bak"
+				ext := suffix[1:]
+				if strings.HasSuffix(file, ext) {
+					skip = true
+					break
+				}
+			} else if strings.HasPrefix(file, suffix) || file == suffix {
+				// 处理精确路径匹配
+				skip = true
+				break
+			}
+		}
+		
+		if !skip && file != "./update_proj" && file != "./update_proj.log" {
 			filteredFiles = append(filteredFiles, file)
 		}
 	}
@@ -197,50 +217,64 @@ func GenerateFileIndex() error {
 	return nil
 }
 
-// 构建优化的find命令字符串，使用-print0和xargs提高性能
+// 构建优化的find命令字符串
 func buildOptimizedFindCommand(patterns []string, isInclude bool, outputFile, errorFile string) string {
 	var cmd strings.Builder
-	cmd.WriteString("find . -type f ")
-
-	// 构建路径参数
-	if len(patterns) > 0 {
-		cmd.WriteString("\\( ")
-		for i, pattern := range patterns {
-			if i > 0 {
-				cmd.WriteString("-o ")
+	
+	if isInclude {
+		// 包含模式
+		cmd.WriteString("find . ")
+		
+		// 添加包含模式
+		if len(patterns) > 0 {
+			cmd.WriteString("\\( ")
+			for i, pattern := range patterns {
+				if i > 0 {
+					cmd.WriteString("-o ")
+				}
+				// 统一使用-wholename参数
+				cmd.WriteString(fmt.Sprintf("-wholename '%s' ", pattern))
 			}
-
-			cmd.WriteString(fmt.Sprintf("-path '%s' ", pattern))
-		}
-		cmd.WriteString("\\) ")
-
-		if isInclude {
-			// 包含模式: 匹配指定路径的文件，大小小于9000k
-			cmd.WriteString("-size -9000k ")
+			cmd.WriteString("\\) ")
+			cmd.WriteString("-type f -size -9000k ")
 		} else {
-			// 排除模式: 排除指定路径，然后匹配其他大小大于0的文件
-			cmd.WriteString("-a -prune -o -size +0 -type f ")
+			cmd.WriteString("-type f -size -9000k ")
 		}
 	} else {
-		// 如果没有模式，则默认查找所有文件
-		if isInclude {
-			cmd.WriteString("-size -9000k ")
-		} else {
-			cmd.WriteString("-size +0 ")
+		// 排除模式 - 在Linux和macOS上使用统一的方式
+		cmd.WriteString("find . ")
+		
+		// 如果有模式，构建排除条件
+		if len(patterns) > 0 {
+			cmd.WriteString("\\( ")
+			
+			// 对所有模式统一使用-wholename
+			for i, pattern := range patterns {
+				if i > 0 {
+					cmd.WriteString("-o ")
+				}
+				cmd.WriteString(fmt.Sprintf("-wholename '%s' ", pattern))
+			}
+			
+			// 使用-prune来排除这些模式，再使用-o来包含其他文件
+			cmd.WriteString("\\) -prune -o ")
 		}
+		
+		// 添加常规文件查找
+		cmd.WriteString("-type f -size +0 ")
 	}
-
-	// 使用-print0和xargs配合grep提高性能
-	cmd.WriteString("-print0 | xargs -0 -I{} -P8 grep -Il \"\" {} 2>>")
+	
+	// 使用grep过滤文本文件 - 与bash脚本保持一致
+	cmd.WriteString("-exec grep -Il \"\" {} \\; 2>>")
 	cmd.WriteString(errorFile)
-
-	// 输出重定向
+	
+	// 添加输出重定向
 	if isInclude {
 		cmd.WriteString(fmt.Sprintf(" >>%s || true", outputFile))
 	} else {
 		cmd.WriteString(fmt.Sprintf(" >%s || true", outputFile))
 	}
-
+	
 	return cmd.String()
 }
 
@@ -310,3 +344,4 @@ func appendUniqueLine(filePath, line string) error {
 	_, err = file.WriteString(line + "\n")
 	return err
 }
+
