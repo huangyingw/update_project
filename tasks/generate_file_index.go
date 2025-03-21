@@ -1,6 +1,7 @@
 package tasks
 
 import (
+	"bufio"
 	"fmt"
 	"io/ioutil"
 	"os"
@@ -9,248 +10,206 @@ import (
 	"projupdater/utils"
 	"sort"
 	"strings"
-	"sync"
 )
 
 func GenerateFileIndex() error {
 	targetDir, err := os.Getwd()
 	if err != nil {
-		return err
+		return fmt.Errorf("获取当前目录失败: %v", err)
 	}
+
+	fmt.Printf("INFO: 在目录 %s 中生成文件索引\n", targetDir)
 
 	filesProjPath := filepath.Join(targetDir, "files.proj")
 	if _, err := os.Stat(filesProjPath); os.IsNotExist(err) {
-		return fmt.Errorf("当前目录下不存在 files.proj 文件")
+		return fmt.Errorf("当前目录下不存在 files.proj 文件，无法生成索引")
 	}
 
-	// 备份原有的 files.proj
-	backupPath := filesProjPath + ".bak"
-	err = utils.CopyFile(filesProjPath, backupPath)
+	// 复制配置文件模板（如果需要）
+	configFiles := []string{"prunefix", "prunefile", "includefile"}
+	for _, file := range configFiles {
+		configPath := fmt.Sprintf("%s.conf", file)
+		if _, err := os.Stat(configPath); os.IsNotExist(err) {
+			templatePath := filepath.Join(os.Getenv("HOME"), "loadrc", fmt.Sprintf("%s_template.conf", file))
+			if err := utils.CopyFile(templatePath, configPath); err != nil {
+				fmt.Printf("WARN: 无法复制配置模板 %s: %v\n", file, err)
+			} else {
+				fmt.Printf("INFO: 已复制 %s 配置模板\n", file)
+			}
+		} else {
+			fmt.Printf("INFO: %s.conf 已存在，跳过\n", file)
+		}
+	}
+
+	// 创建临时文件
+	tempTarget, err := ioutil.TempFile("", "files_proj_temp")
 	if err != nil {
-		return err
+		return fmt.Errorf("创建临时文件失败: %v", err)
 	}
+	tempTarget.Close()
+	defer os.Remove(tempTarget.Name())
 
-	// 准备临时文件
-	tempFile, err := ioutil.TempFile("", "files.proj.*.tmp")
+	tempError, err := ioutil.TempFile("", "files_proj_error")
 	if err != nil {
-		return err
+		return fmt.Errorf("创建错误日志文件失败: %v", err)
 	}
-	defer os.Remove(tempFile.Name())
-	tempFile.Close() // 关闭文件，让find命令可以直接写入
+	tempError.Close()
+	defer os.Remove(tempError.Name())
 
-	// 准备错误日志文件
-	errFile, err := ioutil.TempFile("", "files.proj.*.errors")
+	// 读取配置文件
+	pruneParams, err := readConfigParams("prunefix.conf")
 	if err != nil {
-		return err
-	}
-	defer os.Remove(errFile.Name())
-	errFile.Close() // 关闭文件，让find命令可以直接写入
-
-	// 读取配置文件 - 并行读取提高性能
-	var (
-		pruneSuffixes []string
-		pruneFiles    []string
-		includeFiles  []string
-		wg            sync.WaitGroup
-		mu            sync.Mutex
-		readError     error
-	)
-
-	wg.Add(3)
-	go func() {
-		defer wg.Done()
-		ps, err := readConfig("prunefix.conf")
-		if err != nil {
-			mu.Lock()
-			readError = err
-			mu.Unlock()
-			return
-		}
-		mu.Lock()
-		pruneSuffixes = ps
-		mu.Unlock()
-	}()
-
-	go func() {
-		defer wg.Done()
-		pf, err := readConfig("prunefile.conf")
-		if err != nil {
-			mu.Lock()
-			readError = err
-			mu.Unlock()
-			return
-		}
-		mu.Lock()
-		pruneFiles = pf
-		mu.Unlock()
-	}()
-
-	go func() {
-		defer wg.Done()
-		inf, err := readConfig("includefile.conf")
-		if err != nil {
-			mu.Lock()
-			readError = err
-			mu.Unlock()
-			return
-		}
-		mu.Lock()
-		includeFiles = inf
-		mu.Unlock()
-	}()
-
-	wg.Wait()
-
-	if readError != nil {
-		return readError
+		return fmt.Errorf("读取prunefix.conf失败: %v", err)
 	}
 
-	// 并行执行两条find命令
-	var findWg sync.WaitGroup
-	findErrChan := make(chan error, 2)
-
-	findWg.Add(2)
-	go func() {
-		defer findWg.Done()
-		cmd1 := buildOptimizedFindCommand(pruneSuffixes, false, tempFile.Name(), errFile.Name())
-		fmt.Println("执行命令1:", cmd1)
-		findCmd1 := exec.Command("sh", "-c", cmd1)
-		if err := findCmd1.Run(); err != nil {
-			findErrChan <- fmt.Errorf("find命令1执行出错：%v", err)
-		}
-	}()
-
-	go func() {
-		defer findWg.Done()
-		cmd2 := buildOptimizedFindCommand(includeFiles, true, tempFile.Name(), errFile.Name())
-		fmt.Println("执行命令2:", cmd2)
-		findCmd2 := exec.Command("sh", "-c", cmd2)
-		if err := findCmd2.Run(); err != nil {
-			findErrChan <- fmt.Errorf("find命令2执行出错：%v", err)
-		}
-	}()
-
-	findWg.Wait()
-	close(findErrChan)
-
-	// 检查find命令是否有错误，但继续执行而不中断
-	for err := range findErrChan {
-		fmt.Printf("警告：%v\n", err)
-	}
-
-	// 创建处理后的临时文件
-	finalTempFile, err := ioutil.TempFile("", "files.proj.*.final")
+	includeParams, err := readConfigParams("includefile.conf")
 	if err != nil {
-		return err
+		return fmt.Errorf("读取includefile.conf失败: %v", err)
 	}
-	defer os.Remove(finalTempFile.Name())
-	
-	// 读取临时文件，排序并去重
-	fileBytes, err := ioutil.ReadFile(tempFile.Name())
+
+	// 执行find命令
+	findCmd := buildFindCommand(pruneParams, false, tempTarget.Name(), tempError.Name())
+	fmt.Printf("INFO: 执行find命令: %s\n", findCmd)
+	cmd := exec.Command("sh", "-c", findCmd)
+	if err := cmd.Run(); err != nil {
+		fmt.Printf("WARN: find命令执行出现错误: %v\n", err)
+		// 继续执行，不中断流程
+	}
+
+	// 如果有包含参数，执行额外的find命令
+	if len(includeParams) > 0 {
+		includeFindCmd := buildFindCommand(includeParams, true, tempTarget.Name(), tempError.Name())
+		fmt.Printf("INFO: 执行include find命令: %s\n", includeFindCmd)
+		cmd = exec.Command("sh", "-c", includeFindCmd)
+		if err := cmd.Run(); err != nil {
+			fmt.Printf("WARN: include find命令执行出现错误: %v\n", err)
+			// 继续执行，不中断流程
+		}
+	}
+
+	// 检查错误日志
+	if errorInfo, err := ioutil.ReadFile(tempError.Name()); err == nil && len(errorInfo) > 0 {
+		fmt.Printf("INFO: find命令执行时有一些错误，查看 %s 获取详情\n", tempError.Name())
+	}
+
+	// 处理临时文件路径
+	tempSorted, err := ioutil.TempFile("", "files_proj_sorted")
 	if err != nil {
-		return err
+		return fmt.Errorf("创建排序临时文件失败: %v", err)
 	}
-	
-	// 处理文件路径 - 与bash脚本保持一致
-	fileLines := strings.Split(string(fileBytes), "\n")
-	var processedLines []string
-	
-	for _, line := range fileLines {
-		if line == "" {
-			continue
-		}
-		// 去除开头的 ./
-		line = strings.TrimPrefix(line, "./")
-		// 添加 "./ 前缀和 " 后缀
-		if !strings.HasPrefix(line, "\"./") {
-			line = "\"./"+line+"\""
-		}
-		processedLines = append(processedLines, line)
+	tempSorted.Close()
+	defer os.Remove(tempSorted.Name())
+
+	// 使用sed处理文件路径，确保格式正确，并使用LC_ALL=C确保排序一致性
+	sedCmd := fmt.Sprintf("LC_ALL=C sed -e 's|^\\./||' -e 's|^|\"./|' -e 's|$|\"|' \"%s\" | LC_ALL=C sort -u > \"%s\"",
+		tempTarget.Name(), tempSorted.Name())
+	cmd = exec.Command("sh", "-c", sedCmd)
+	if err := cmd.Run(); err != nil {
+		return fmt.Errorf("处理文件路径失败: %v", err)
 	}
-	
-	// 对行进行排序并去重
-	sort.Strings(processedLines)
-	processedLines = uniqueStrings(processedLines)
-	
-	// 读取 prunefile.conf 并进行文件排除
-	pruneFileMap := make(map[string]struct{})
-	for _, file := range pruneFiles {
-		pruneFileMap[file] = struct{}{}
+
+	// 创建排序的prune文件
+	sortedPrune, err := ioutil.TempFile("", "files_proj_prune_sorted")
+	if err != nil {
+		return fmt.Errorf("创建排序prune文件失败: %v", err)
 	}
-	
-	// 将处理后的行写入临时文件
-	for _, line := range processedLines {
-		// 跳过空行和以 "../." 开头的条目
-		if line == "" || strings.HasPrefix(line, "\"../.") {
-			continue
-		}
-		
-		// 确保格式一致，将 "." 替换为 "./"
-		if line == "\"." {
-			line = "\"./\""
-		}
-		
-		// 检查是否在排除列表中
-		_, excluded := pruneFileMap[line]
-		if !excluded {
-			fmt.Fprintln(finalTempFile, line)
-		}
+	sortedPrune.Close()
+	defer os.Remove(sortedPrune.Name())
+
+	// 对prune文件进行排序，确保使用LC_ALL=C
+	sortCmd := fmt.Sprintf("LC_ALL=C sort \"prunefile.conf\" > \"%s\"", sortedPrune.Name())
+	cmd = exec.Command("sh", "-c", sortCmd)
+	if err := cmd.Run(); err != nil {
+		return fmt.Errorf("排序prunefile失败: %v", err)
 	}
-	
-	finalTempFile.Close()
-	
-	// 验证生成的文件不为空
-	fi, err := os.Stat(finalTempFile.Name())
-	if err != nil || fi.Size() == 0 {
+
+	// 使用comm命令来排除文件（兼容Linux和macOS）
+	finalTarget, err := ioutil.TempFile("", "files_proj_final")
+	if err != nil {
+		return fmt.Errorf("创建最终文件失败: %v", err)
+	}
+	finalTarget.Close()
+	defer os.Remove(finalTarget.Name())
+
+	commCmd := fmt.Sprintf("LC_ALL=C comm -23 \"%s\" \"%s\" > \"%s\" 2>/tmp/comm_error.log",
+		tempSorted.Name(), sortedPrune.Name(), finalTarget.Name())
+	fmt.Printf("INFO: 执行comm命令: %s\n", commCmd)
+	cmd = exec.Command("sh", "-c", commCmd)
+	if err := cmd.Run(); err != nil {
+		// 读取错误日志
+		errorLog, readErr := ioutil.ReadFile("/tmp/comm_error.log")
+		if readErr == nil && len(errorLog) > 0 {
+			fmt.Printf("WARN: comm命令错误输出: %s\n", string(errorLog))
+		}
+		return fmt.Errorf("comm命令执行失败: %v", err)
+	}
+
+	// 移除可能的空行和不正确的条目
+	cleanCmd := fmt.Sprintf("sed -e '/^$/d' -e '/^\"\\.\\.\\/\\./d' -e 's/^\"\\./\"\\./g' \"%s\" > \"%s.new\" && mv \"%s.new\" \"%s\"",
+		finalTarget.Name(), finalTarget.Name(), finalTarget.Name(), finalTarget.Name())
+	cmd = exec.Command("sh", "-c", cleanCmd)
+	if err := cmd.Run(); err != nil {
+		return fmt.Errorf("清理文件失败: %v", err)
+	}
+
+	// 验证生成的文件
+	finalInfo, err := os.Stat(finalTarget.Name())
+	if err != nil || finalInfo.Size() == 0 {
 		return fmt.Errorf("生成的文件为空")
 	}
-	
+
+	// 备份现有的files.proj
+	backupPath := filesProjPath + ".bak"
+	if err := utils.CopyFile(filesProjPath, backupPath); err != nil {
+		return fmt.Errorf("备份files.proj失败: %v", err)
+	}
+
 	// 检查文件是否有变化
-	diffCmd := exec.Command("diff", "-q", finalTempFile.Name(), filesProjPath)
+	diffCmd := exec.Command("diff", "-q", finalTarget.Name(), filesProjPath)
 	if diffCmd.Run() == nil {
-		fmt.Println("files.proj 没有变化，保留原文件")
+		fmt.Println("INFO: files.proj 没有变化，保留原文件")
 		return nil
 	}
-	
-	// 替换原有的 files.proj
-	tempNewFile := filesProjPath + ".new"
-	if err := utils.CopyFile(finalTempFile.Name(), tempNewFile); err != nil {
-		return err
+
+	// 更新files.proj
+	newPath := filesProjPath + ".new"
+	if err := utils.CopyFile(finalTarget.Name(), newPath); err != nil {
+		return fmt.Errorf("创建新files.proj失败: %v", err)
 	}
-	if err := os.Rename(tempNewFile, filesProjPath); err != nil {
+
+	if err := os.Rename(newPath, filesProjPath); err != nil {
 		// 恢复备份
 		utils.CopyFile(backupPath, filesProjPath)
-		return err
+		return fmt.Errorf("重命名新files.proj失败: %v", err)
 	}
 
-	// 更新 ~/all.proj
+	// 更新~/all.proj
 	allProjPath := filepath.Join(os.Getenv("HOME"), "all.proj")
-	targetEntry := fmt.Sprintf("\"%s/files.proj\"", targetDir)
-	err = appendUniqueLine(allProjPath, targetEntry)
-	if err != nil {
-		return err
+	newEntry := fmt.Sprintf("\"%s/files.proj\"", targetDir)
+	if err := appendUniqueLine(allProjPath, newEntry); err != nil {
+		return fmt.Errorf("更新all.proj失败: %v", err)
 	}
 
-	fmt.Println("成功更新 files.proj")
+	fmt.Println("INFO: 脚本执行成功")
 	return nil
 }
 
-// 构建优化的find命令字符串
-func buildOptimizedFindCommand(patterns []string, isInclude bool, outputFile, errorFile string) string {
+// 构建find命令
+func buildFindCommand(patterns []string, isInclude bool, outputFile, errorFile string) string {
 	var cmd strings.Builder
-	
+
+	cmd.WriteString("find . ")
+
 	if isInclude {
 		// 包含模式
-		cmd.WriteString("find . ")
-		
-		// 添加包含模式
 		if len(patterns) > 0 {
 			cmd.WriteString("\\( ")
 			for i, pattern := range patterns {
 				if i > 0 {
 					cmd.WriteString("-o ")
 				}
-				// 统一使用-wholename参数，与bash脚本保持一致
+				// 去除可能的引号
+				pattern = strings.Trim(pattern, "\"")
 				cmd.WriteString(fmt.Sprintf("-wholename '%s' ", pattern))
 			}
 			cmd.WriteString("\\) ")
@@ -259,125 +218,107 @@ func buildOptimizedFindCommand(patterns []string, isInclude bool, outputFile, er
 			cmd.WriteString("-type f -size -9000k ")
 		}
 	} else {
-		// 排除模式 - 在Linux和macOS上使用统一的方式
-		cmd.WriteString("find . ")
-		
-		// 如果有模式，构建排除条件
+		// 排除模式
 		if len(patterns) > 0 {
 			cmd.WriteString("\\( ")
-			
-			// 对所有模式统一使用-wholename
 			for i, pattern := range patterns {
 				if i > 0 {
 					cmd.WriteString("-o ")
 				}
+				// 去除可能的引号
+				pattern = strings.Trim(pattern, "\"")
 				cmd.WriteString(fmt.Sprintf("-wholename '%s' ", pattern))
 			}
-			
-			// 使用-prune来排除这些模式，再使用-o来包含其他文件
 			cmd.WriteString("\\) -a -prune -o ")
 		}
-		
-		// 添加常规文件查找
 		cmd.WriteString("-size +0 -type f ")
 	}
-	
-	// 使用grep过滤文本文件 - 与bash脚本保持一致
-	// 使用 + 而不是 \; 来提高性能
+
+	// 使用grep过滤文本文件
 	cmd.WriteString("-exec grep -Il \"\" {} + 2>>")
 	cmd.WriteString(errorFile)
-	
+
 	// 添加输出重定向
 	if isInclude {
 		cmd.WriteString(fmt.Sprintf(" >>%s || true", outputFile))
 	} else {
 		cmd.WriteString(fmt.Sprintf(" >%s || true", outputFile))
 	}
-	
+
 	return cmd.String()
 }
 
-func readConfig(filename string) ([]string, error) {
-	var lines []string
-	
-	// 先检查文件是否存在
-	if _, err := os.Stat(filename); os.IsNotExist(err) {
-		return lines, nil
+// 读取配置文件并构建参数
+func readConfigParams(fileName string) ([]string, error) {
+	var params []string
+
+	// 检查文件是否存在
+	if _, err := os.Stat(fileName); os.IsNotExist(err) {
+		return params, nil
 	}
-	
-	// 读取文件内容
-	content, err := ioutil.ReadFile(filename)
+
+	file, err := os.Open(fileName)
 	if err != nil {
 		return nil, err
 	}
-	
-	// 处理文件内容
-	fileLines := strings.Split(string(content), "\n")
-	for _, line := range fileLines {
-		line = strings.TrimSpace(line)
+	defer file.Close()
+
+	scanner := bufio.NewScanner(file)
+	for scanner.Scan() {
+		line := strings.TrimSpace(scanner.Text())
 		if line != "" && !strings.HasPrefix(line, "#") {
-			lines = append(lines, line)
+			// 去除可能的引号
+			line = strings.Trim(line, "\"")
+			params = append(params, line)
 		}
 	}
-	
-	return lines, nil
+
+	return params, scanner.Err()
 }
 
-func uniqueStrings(input []string) []string {
-	// 对于大量数据，使用map比循环检查更高效
-	seen := make(map[string]struct{}, len(input))
-	var result []string
-	
-	for _, str := range input {
-		if str == "" {
-			continue
-		}
-		if _, found := seen[str]; !found {
-			seen[str] = struct{}{}
-			result = append(result, str)
-		}
-	}
-	return result
-}
-
+// 追加唯一行到文件
 func appendUniqueLine(filePath, line string) error {
-	// 先检查文件是否存在，如果不存在则创建
-	if _, err := os.Stat(filePath); os.IsNotExist(err) {
-		// 创建目录（如果需要）
-		if err := os.MkdirAll(filepath.Dir(filePath), 0755); err != nil {
+	// 检查文件是否存在
+	var lines []string
+	
+	if _, err := os.Stat(filePath); !os.IsNotExist(err) {
+		// 文件存在，读取内容
+		content, err := ioutil.ReadFile(filePath)
+		if err != nil {
 			return err
 		}
-		// 创建文件并写入行
-		return ioutil.WriteFile(filePath, []byte(line+"\n"), 0644)
-	}
-	
-	// 读取整个文件
-	content, err := ioutil.ReadFile(filePath)
-	if err != nil {
-		return err
-	}
-	
-	// 检查行是否已存在
-	lines := strings.Split(string(content), "\n")
-	for _, existingLine := range lines {
-		if existingLine == line {
-			return nil // 行已存在，不需要添加
+		
+		lines = strings.Split(string(content), "\n")
+		
+		// 检查行是否已存在
+		for _, existingLine := range lines {
+			if existingLine == line {
+				return nil // 行已存在，不需要添加
+			}
 		}
 	}
 	
-	// 追加新行
+	// 添加新行
 	lines = append(lines, line)
 	
-	// 去除空行并排序
+	// 过滤空行
 	var nonEmptyLines []string
 	for _, l := range lines {
 		if l != "" {
 			nonEmptyLines = append(nonEmptyLines, l)
 		}
 	}
+	
+	// 排序
 	sort.Strings(nonEmptyLines)
 	
-	// 写回文件
+	// 确保目录存在
+	dir := filepath.Dir(filePath)
+	if err := os.MkdirAll(dir, 0755); err != nil {
+		return err
+	}
+	
+	// 写入文件
 	return ioutil.WriteFile(filePath, []byte(strings.Join(nonEmptyLines, "\n")+"\n"), 0644)
 }
 
