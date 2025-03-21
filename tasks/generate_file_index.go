@@ -1,9 +1,7 @@
 package tasks
 
 import (
-	"bufio"
 	"fmt"
-	"io/ioutil"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -42,14 +40,14 @@ func GenerateFileIndex() error {
 	}
 
 	// 创建临时文件
-	tempTarget, err := ioutil.TempFile("", "files_proj_temp")
+	tempTarget, err := os.CreateTemp("", "files_proj_temp")
 	if err != nil {
 		return fmt.Errorf("创建临时文件失败: %v", err)
 	}
 	tempTarget.Close()
 	defer os.Remove(tempTarget.Name())
 
-	tempError, err := ioutil.TempFile("", "files_proj_error")
+	tempError, err := os.CreateTemp("", "files_proj_error")
 	if err != nil {
 		return fmt.Errorf("创建错误日志文件失败: %v", err)
 	}
@@ -57,12 +55,12 @@ func GenerateFileIndex() error {
 	defer os.Remove(tempError.Name())
 
 	// 读取配置文件
-	pruneParams, err := readConfigParams("prunefix.conf")
+	pruneParams, err := utils.ReadFileLines("prunefix.conf")
 	if err != nil {
 		return fmt.Errorf("读取prunefix.conf失败: %v", err)
 	}
 
-	includeParams, err := readConfigParams("includefile.conf")
+	includeParams, err := utils.ReadFileLines("includefile.conf")
 	if err != nil {
 		return fmt.Errorf("读取includefile.conf失败: %v", err)
 	}
@@ -88,12 +86,12 @@ func GenerateFileIndex() error {
 	}
 
 	// 检查错误日志
-	if errorInfo, err := ioutil.ReadFile(tempError.Name()); err == nil && len(errorInfo) > 0 {
+	if errorInfo, err := os.ReadFile(tempError.Name()); err == nil && len(errorInfo) > 0 {
 		fmt.Printf("INFO: find命令执行时有一些错误，查看 %s 获取详情\n", tempError.Name())
 	}
 
 	// 处理临时文件路径
-	tempSorted, err := ioutil.TempFile("", "files_proj_sorted")
+	tempSorted, err := os.CreateTemp("", "files_proj_sorted")
 	if err != nil {
 		return fmt.Errorf("创建排序临时文件失败: %v", err)
 	}
@@ -109,7 +107,7 @@ func GenerateFileIndex() error {
 	}
 
 	// 创建排序的prune文件
-	sortedPrune, err := ioutil.TempFile("", "files_proj_prune_sorted")
+	sortedPrune, err := os.CreateTemp("", "files_proj_prune_sorted")
 	if err != nil {
 		return fmt.Errorf("创建排序prune文件失败: %v", err)
 	}
@@ -124,7 +122,7 @@ func GenerateFileIndex() error {
 	}
 
 	// 使用comm命令来排除文件（兼容Linux和macOS）
-	finalTarget, err := ioutil.TempFile("", "files_proj_final")
+	finalTarget, err := os.CreateTemp("", "files_proj_final")
 	if err != nil {
 		return fmt.Errorf("创建最终文件失败: %v", err)
 	}
@@ -134,13 +132,8 @@ func GenerateFileIndex() error {
 	commCmd := fmt.Sprintf("LC_ALL=C comm -23 \"%s\" \"%s\" > \"%s\" 2>/tmp/comm_error.log",
 		tempSorted.Name(), sortedPrune.Name(), finalTarget.Name())
 	fmt.Printf("INFO: 执行comm命令: %s\n", commCmd)
-	cmd = exec.Command("sh", "-c", commCmd)
+	cmd = exec.Command("bash", "-c", commCmd)
 	if err := cmd.Run(); err != nil {
-		// 读取错误日志
-		errorLog, readErr := ioutil.ReadFile("/tmp/comm_error.log")
-		if readErr == nil && len(errorLog) > 0 {
-			fmt.Printf("WARN: comm命令错误输出: %s\n", string(errorLog))
-		}
 		return fmt.Errorf("comm命令执行失败: %v", err)
 	}
 
@@ -248,48 +241,20 @@ func buildFindCommand(patterns []string, isInclude bool, outputFile, errorFile s
 	return cmd.String()
 }
 
-// 读取配置文件并构建参数
-func readConfigParams(fileName string) ([]string, error) {
-	var params []string
-
-	// 检查文件是否存在
-	if _, err := os.Stat(fileName); os.IsNotExist(err) {
-		return params, nil
-	}
-
-	file, err := os.Open(fileName)
-	if err != nil {
-		return nil, err
-	}
-	defer file.Close()
-
-	scanner := bufio.NewScanner(file)
-	for scanner.Scan() {
-		line := strings.TrimSpace(scanner.Text())
-		if line != "" && !strings.HasPrefix(line, "#") {
-			// 去除可能的引号
-			line = strings.Trim(line, "\"")
-			params = append(params, line)
-		}
-	}
-
-	return params, scanner.Err()
-}
-
 // 追加唯一行到文件
 func appendUniqueLine(filePath, line string) error {
 	// 检查文件是否存在
 	var lines []string
-	
+
 	if _, err := os.Stat(filePath); !os.IsNotExist(err) {
 		// 文件存在，读取内容
-		content, err := ioutil.ReadFile(filePath)
+		content, err := os.ReadFile(filePath)
 		if err != nil {
 			return err
 		}
-		
+
 		lines = strings.Split(string(content), "\n")
-		
+
 		// 检查行是否已存在
 		for _, existingLine := range lines {
 			if existingLine == line {
@@ -297,28 +262,27 @@ func appendUniqueLine(filePath, line string) error {
 			}
 		}
 	}
-	
+
 	// 添加新行
 	lines = append(lines, line)
-	
-	// 过滤空行
+
+	// 过滤空行并排序
 	var nonEmptyLines []string
 	for _, l := range lines {
 		if l != "" {
 			nonEmptyLines = append(nonEmptyLines, l)
 		}
 	}
-	
+
 	// 排序
 	sort.Strings(nonEmptyLines)
-	
+
 	// 确保目录存在
 	dir := filepath.Dir(filePath)
 	if err := os.MkdirAll(dir, 0755); err != nil {
 		return err
 	}
-	
-	// 写入文件
-	return ioutil.WriteFile(filePath, []byte(strings.Join(nonEmptyLines, "\n")+"\n"), 0644)
-}
 
+	// 写入文件
+	return os.WriteFile(filePath, []byte(strings.Join(nonEmptyLines, "\n")+"\n"), 0644)
+}

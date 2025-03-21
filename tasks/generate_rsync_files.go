@@ -1,13 +1,12 @@
 package tasks
 
 import (
-	"bufio"
 	"fmt"
-	"io/ioutil"
 	"os"
-	"projupdater/utils"
-	"sort"
+	"os/exec"
 	"strings"
+
+	"projupdater/utils"
 )
 
 func GenerateRsyncFiles() error {
@@ -16,142 +15,195 @@ func GenerateRsyncFiles() error {
 		return fmt.Errorf("当前目录下不存在 files.proj 文件")
 	}
 
-	// 准备临时文件
-	tempFile, err := ioutil.TempFile("", "rsync.files.*.tmp")
-	if err != nil {
-		return err
-	}
-	defer os.Remove(tempFile.Name())
+	// 定义文件路径
+	rsyncFilesTmp := "rsync.files.tmp"
+	prunefixFile := "prunefix.rsync"
+	includeFile := "includefile.rsync"
 
-	// 使用和原始bash脚本相同的逻辑来过滤文件
 	// 读取files.proj文件
-	filesProjContent, err := ioutil.ReadFile("files.proj")
+	filesProj, err := utils.ReadFilesProj("files.proj")
 	if err != nil {
 		return err
 	}
 
-	// 获取当前Git分支
-	currentBranch, err := utils.GetCurrentBranch()
-	if err != nil {
-		fmt.Printf("警告：获取Git分支失败：%v，使用'main'作为默认分支\n", err)
-		currentBranch = "main"
-	}
-
-	// 构建分支对应的diff文件路径
-	branchDiffFile := fmt.Sprintf("./%s.gdio.diff", currentBranch)
-
-	// 处理文件内容，移除引号并过滤
-	lines := strings.Split(string(filesProjContent), "\n")
-	var filteredLines []string
-
-	for _, line := range lines {
-		// 移除引号
-		line = strings.Trim(line, "\"")
-		if line == "" {
-			continue
-		}
-
-		// 过滤掉不需要的文件
-		if strings.HasSuffix(line, ".log") ||
-			strings.HasSuffix(line, ".bak") ||
-			strings.HasSuffix(line, ".tmp") ||
-			strings.HasSuffix(line, ".swp") ||
-			strings.Contains(line, ".git") ||
-			strings.Contains(line, ".svn") ||
-			line == branchDiffFile {
-			continue
-		}
-
-		filteredLines = append(filteredLines, line)
-	}
-
-	// 确保包含.gitconfig文件
-	hasGitConfig := false
-	for _, line := range filteredLines {
-		if line == "./.gitconfig" {
-			hasGitConfig = true
-			break
-		}
-	}
-	if !hasGitConfig {
-		filteredLines = append(filteredLines, "./.gitconfig")
-	}
-
-	// 确保包含update_proj和update_proj.log文件
-	hasUpdateProj := false
-	hasUpdateProjLog := false
-	for _, line := range filteredLines {
-		if line == "./update_proj" {
-			hasUpdateProj = true
-		}
-		if line == "./update_proj.log" {
-			hasUpdateProjLog = true
-		}
-	}
-	if !hasUpdateProj {
-		filteredLines = append(filteredLines, "./update_proj")
-	}
-	if !hasUpdateProjLog {
-		filteredLines = append(filteredLines, "./update_proj.log")
-	}
-
-	// 排序
-	sort.Strings(filteredLines)
-
-	// 写入临时文件，每行一个文件路径，不带引号
-	for _, line := range filteredLines {
-		fmt.Fprintln(tempFile, line)
-	}
-	tempFile.Close()
-
-	// 读取临时文件内容
-	content, err := ioutil.ReadFile(tempFile.Name())
+	// 将处理后的files.proj写入临时文件
+	err = utils.WriteLinesToFile(rsyncFilesTmp, filesProj)
 	if err != nil {
 		return err
 	}
 
-	// 写入 rsync.files
-	err = ioutil.WriteFile("rsync.files", content, 0644)
+	// 确保prunefix.rsync文件存在
+	if _, err := os.Stat(prunefixFile); os.IsNotExist(err) {
+		_, err = os.Create(prunefixFile)
+		if err != nil {
+			return err
+		}
+	}
+
+	// 读取prunefix.rsync文件中的排除规则
+	prunePatterns, err := utils.ReadFileLines(prunefixFile)
 	if err != nil {
 		return err
 	}
+
+	// 构建find命令参数以排除文件
+	if len(prunePatterns) > 0 {
+		// 创建临时文件用于存储diff结果
+		rsyncFilesDiff := rsyncFilesTmp + ".diff"
+
+		// 构建find命令来查找符合排除规则的文件
+		args := []string{"."}
+
+		// 添加路径模式
+		if len(prunePatterns) > 0 {
+			args = append(args, "(")
+			for i, pattern := range prunePatterns {
+				pattern = strings.Trim(pattern, "\"")
+				if i > 0 {
+					args = append(args, "-o")
+				}
+				args = append(args, "-path", pattern)
+			}
+			args = append(args, ")")
+		}
+
+		// 添加类型和大小限制
+		args = append(args, "-type", "f", "-size", "-9000k")
+
+		// 执行find命令
+		cmd := exec.Command("find", args...)
+		diffOutput, err := cmd.Output()
+		if err != nil {
+			fmt.Printf("警告: find命令执行失败: %v\n", err)
+		} else {
+			// 写入diff文件
+			err = os.WriteFile(rsyncFilesDiff, diffOutput, 0644)
+			if err != nil {
+				return err
+			}
+
+			// 执行comm命令比较文件
+			rsyncFilesTmp2 := rsyncFilesTmp + ".tmp"
+			commCmd := exec.Command("bash", "-c",
+				"comm -23 <(sort \""+rsyncFilesTmp+"\") <(sort \""+rsyncFilesDiff+"\")")
+			commCmd.Env = append(os.Environ(), "SHELL=bash")
+			commCmd.Dir = "."
+			commCmd.Stderr = os.Stderr
+			commOutput, err := commCmd.Output()
+
+			if err != nil {
+				return fmt.Errorf("comm命令执行失败: %v", err)
+			}
+
+			// 写入输出并复制回原临时文件
+			err = os.WriteFile(rsyncFilesTmp2, commOutput, 0644)
+			if err != nil {
+				return err
+			}
+
+			err = utils.CopyFile(rsyncFilesTmp2, rsyncFilesTmp)
+			if err != nil {
+				return err
+			}
+
+			// 如果存在files.rev，也执行相同的比较
+			if _, err := os.Stat("files.rev"); !os.IsNotExist(err) {
+				commCmd := exec.Command("bash", "-c",
+					"comm -23 <(sort \""+rsyncFilesTmp+"\") <(sort \"files.rev\")")
+				commCmd.Env = append(os.Environ(), "SHELL=bash")
+				commCmd.Dir = "."
+				commCmd.Stderr = os.Stderr
+				commOutput, err := commCmd.Output()
+
+				if err != nil {
+					return fmt.Errorf("comm命令执行失败: %v", err)
+				}
+
+				// 写入输出并复制回原临时文件
+				err = os.WriteFile(rsyncFilesTmp2, commOutput, 0644)
+				if err != nil {
+					return err
+				}
+
+				err = utils.CopyFile(rsyncFilesTmp2, rsyncFilesTmp)
+				if err != nil {
+					return err
+				}
+			}
+
+			// 清理临时文件
+			os.Remove(rsyncFilesDiff)
+			os.Remove(rsyncFilesTmp2)
+		}
+	}
+
+	// 读取includefile.rsync文件中的包含规则
+	includePatterns, err := utils.ReadFileLines(includeFile)
+	if err != nil {
+		return err
+	}
+
+	// 处理包含规则
+	if len(includePatterns) > 0 {
+		// 构建find命令来查找符合包含规则的文件
+		args := []string{"."}
+
+		// 添加路径模式
+		if len(includePatterns) > 0 {
+			args = append(args, "(")
+			for i, pattern := range includePatterns {
+				pattern = strings.Trim(pattern, "\"")
+				if i > 0 {
+					args = append(args, "-o")
+				}
+				args = append(args, "-path", pattern)
+			}
+			args = append(args, ")")
+		}
+
+		// 添加类型限制
+		args = append(args, "-type", "f")
+
+		// 执行find命令
+		cmd := exec.Command("find", args...)
+		includeOutput, err := cmd.Output()
+		if err != nil {
+			fmt.Printf("警告: find命令执行失败: %v\n", err)
+		} else {
+			// 读取现有的rsync.files.tmp内容
+			existingContent, err := os.ReadFile(rsyncFilesTmp)
+			if err != nil {
+				return err
+			}
+
+			// 合并内容
+			allContent := string(existingContent) + string(includeOutput)
+
+			// 写回临时文件
+			err = os.WriteFile(rsyncFilesTmp, []byte(allContent), 0644)
+			if err != nil {
+				return err
+			}
+
+			// 排序并去重
+			sortCmd := exec.Command("sort", "-u", rsyncFilesTmp, "-o", rsyncFilesTmp)
+			err = sortCmd.Run()
+			if err != nil {
+				return fmt.Errorf("sort命令执行失败: %v", err)
+			}
+		}
+	}
+
+	// 最后，复制临时文件为正式文件
+	err = utils.CopyFile(rsyncFilesTmp, "rsync.files")
+	if err != nil {
+		return err
+	}
+
+	// 清理临时文件
+	os.Remove(rsyncFilesTmp)
+	os.Remove("rsync.files.tmp")
 
 	fmt.Println("成功生成 rsync.files")
 	return nil
-}
-
-func readFilesProj(filename string) ([]string, error) {
-	var files []string
-	file, err := os.Open(filename)
-	if err != nil {
-		return files, err
-	}
-	defer file.Close()
-
-	scanner := bufio.NewScanner(file)
-	for scanner.Scan() {
-		line := strings.Trim(scanner.Text(), "\"")
-		line = strings.ReplaceAll(line, "\\ ", " ")
-		if line != "" {
-			files = append(files, line)
-		}
-	}
-	return files, scanner.Err()
-}
-
-func filterBySuffix(files, suffixes []string) []string {
-	var result []string
-	for _, file := range files {
-		match := false
-		for _, suf := range suffixes {
-			if strings.HasSuffix(file, suf) {
-				match = true
-				break
-			}
-		}
-		if !match {
-			result = append(result, file)
-		}
-	}
-	return result
 }

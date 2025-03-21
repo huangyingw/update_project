@@ -7,6 +7,8 @@ import (
 	"os/exec"
 	"strings"
 	"sync"
+
+	"projupdater/utils"
 )
 
 func RunCscope() error {
@@ -27,7 +29,7 @@ func RunCscope() error {
 	defer cleanup()
 
 	// 复制 files.proj 并处理特殊字符 - 这两步合并成一个操作提高性能
-	err := copyFileAndReplace("files.proj", sourceFile, `\\ `, ` `)
+	err := utils.CopyFileAndReplace("files.proj", sourceFile, `\\ `, ` `)
 	if err != nil {
 		return fmt.Errorf("复制并处理文件失败: %w", err)
 	}
@@ -162,16 +164,6 @@ func copyFileAndReplace(src, dst, oldStr, newStr string) error {
 
 	// 写入到目标文件
 	return os.WriteFile(dst, []byte(output), 0644)
-}
-
-// 保留旧的copyFile和replaceInFile函数以兼容其他可能调用它们的代码
-func copyFile(src, dst string) error {
-	input, err := os.ReadFile(src)
-	if err != nil {
-		return err
-	}
-	err = os.WriteFile(dst, input, 0644)
-	return err
 }
 
 func replaceInFile(filename, oldStr, newStr string) error {
