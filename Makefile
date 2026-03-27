@@ -13,7 +13,7 @@ all: clean build
 
 # 编译目标
 build:
-	go build -o update_proj -ldflags="-s -w" -gcflags="-N -l" -trimpath
+	go build -o update_proj -ldflags="-w" -trimpath
 
 # 测试目标
 test:
