@@ -1,6 +1,7 @@
 package tasks
 
 import (
+	"context"
 	"fmt"
 	"os"
 	"os/exec"
@@ -8,6 +9,14 @@ import (
 	"projupdater/utils"
 	"sort"
 	"strings"
+	"time"
+)
+
+const (
+	// MaxFileCount 是允许处理的最大文件数量，超过此数量将跳过索引生成
+	MaxFileCount = 100000
+	// FindTimeout 是 find 命令的超时时间
+	FindTimeout = 5 * time.Minute
 )
 
 func GenerateFileIndex() error {
@@ -65,21 +74,41 @@ func GenerateFileIndex() error {
 		return fmt.Errorf("读取includefile.conf失败: %v", err)
 	}
 
-	// 执行find命令
+	// 快速估算文件数量，超过阈值则跳过
+	fileCount, err := estimateFileCount(pruneParams)
+	if err != nil {
+		fmt.Printf("WARN: 估算文件数量失败: %v，继续执行\n", err)
+	} else if fileCount > MaxFileCount {
+		return fmt.Errorf("目录下文件数量(%d)超过阈值(%d)，跳过索引生成以避免耗尽系统资源", fileCount, MaxFileCount)
+	} else {
+		fmt.Printf("INFO: 预估文件数量: %d，在阈值(%d)内\n", fileCount, MaxFileCount)
+	}
+
+	// 执行find命令（带超时）
 	findCmd := buildFindCommand(pruneParams, false, tempTarget.Name(), tempError.Name())
 	fmt.Printf("INFO: 执行find命令: %s\n", findCmd)
-	cmd := exec.Command("sh", "-c", findCmd)
+	ctx, cancel := context.WithTimeout(context.Background(), FindTimeout)
+	defer cancel()
+	cmd := exec.CommandContext(ctx, "sh", "-c", findCmd)
 	if err := cmd.Run(); err != nil {
+		if ctx.Err() == context.DeadlineExceeded {
+			return fmt.Errorf("find命令执行超时(%v)，目录文件过多，已终止", FindTimeout)
+		}
 		fmt.Printf("WARN: find命令执行出现错误: %v\n", err)
 		// 继续执行，不中断流程
 	}
 
-	// 如果有包含参数，执行额外的find命令
+	// 如果有包含参数，执行额外的find命令（带超时）
 	if len(includeParams) > 0 {
 		includeFindCmd := buildFindCommand(includeParams, true, tempTarget.Name(), tempError.Name())
 		fmt.Printf("INFO: 执行include find命令: %s\n", includeFindCmd)
-		cmd = exec.Command("sh", "-c", includeFindCmd)
+		ctx2, cancel2 := context.WithTimeout(context.Background(), FindTimeout)
+		defer cancel2()
+		cmd = exec.CommandContext(ctx2, "sh", "-c", includeFindCmd)
 		if err := cmd.Run(); err != nil {
+			if ctx2.Err() == context.DeadlineExceeded {
+				return fmt.Errorf("include find命令执行超时(%v)，目录文件过多，已终止", FindTimeout)
+			}
 			fmt.Printf("WARN: include find命令执行出现错误: %v\n", err)
 			// 继续执行，不中断流程
 		}
@@ -239,6 +268,46 @@ func buildFindCommand(patterns []string, isInclude bool, outputFile, errorFile s
 	}
 
 	return cmd.String()
+}
+
+// estimateFileCount 快速估算目录下的文件数量（排除 prune 目录）
+// 使用 find 配合 head 快速截断，避免遍历全部文件
+func estimateFileCount(pruneParams []string) (int, error) {
+	var cmd strings.Builder
+	cmd.WriteString("find . ")
+
+	// 加入排除规则
+	if len(pruneParams) > 0 {
+		cmd.WriteString("\\( ")
+		for i, pattern := range pruneParams {
+			if i > 0 {
+				cmd.WriteString("-o ")
+			}
+			pattern = strings.Trim(pattern, "\"")
+			cmd.WriteString(fmt.Sprintf("-wholename '%s' ", pattern))
+		}
+		cmd.WriteString("\\) -a -prune -o ")
+	}
+
+	// 只计数文件，用 head 限制输出避免遍历过多
+	limit := MaxFileCount + 1
+	cmdStr := fmt.Sprintf("%s -type f -print | head -n %d | wc -l", cmd.String(), limit)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+
+	out, err := exec.CommandContext(ctx, "sh", "-c", cmdStr).Output()
+	if err != nil {
+		if ctx.Err() == context.DeadlineExceeded {
+			// 30秒内都无法完成计数，说明文件极多
+			return MaxFileCount + 1, nil
+		}
+		return 0, err
+	}
+
+	var count int
+	fmt.Sscanf(strings.TrimSpace(string(out)), "%d", &count)
+	return count, nil
 }
 
 // 追加唯一行到文件

@@ -1,14 +1,24 @@
 package tasks
 
 import (
+	"bufio"
+	"context"
 	"fmt"
 	"io"
 	"os"
 	"os/exec"
 	"strings"
 	"sync"
+	"time"
 
 	"projupdater/utils"
+)
+
+const (
+	// MaxCscopeFiles 是 cscope 允许处理的最大文件数量
+	MaxCscopeFiles = 100000
+	// CscopeTimeout 是 cscope 命令的超时时间
+	CscopeTimeout = 10 * time.Minute
 )
 
 func RunCscope() error {
@@ -34,10 +44,25 @@ func RunCscope() error {
 		return fmt.Errorf("复制并处理文件失败: %w", err)
 	}
 
-	// 运行 cscope 生成临时索引文件，使用-k选项以提高性能
-	cmd := exec.Command("cscope", "-bkq", "-i", sourceFile, "-f", tempCscopeOut)
+	// 检查文件数量，超过阈值则跳过 cscope
+	lineCount, err := countFileLines(sourceFile)
+	if err != nil {
+		fmt.Printf("WARN: 无法统计文件数量: %v，继续执行\n", err)
+	} else if lineCount > MaxCscopeFiles {
+		return fmt.Errorf("files.proj 包含 %d 个文件，超过cscope阈值(%d)，跳过索引生成以避免耗尽系统资源", lineCount, MaxCscopeFiles)
+	} else {
+		fmt.Printf("INFO: files.proj 包含 %d 个文件，在阈值(%d)内\n", lineCount, MaxCscopeFiles)
+	}
+
+	// 运行 cscope 生成临时索引文件，使用-k选项以提高性能（带超时）
+	ctx, cancel := context.WithTimeout(context.Background(), CscopeTimeout)
+	defer cancel()
+	cmd := exec.CommandContext(ctx, "cscope", "-bkq", "-i", sourceFile, "-f", tempCscopeOut)
 	output, err := cmd.CombinedOutput()
 	if err != nil {
+		if ctx.Err() == context.DeadlineExceeded {
+			return fmt.Errorf("cscope 命令执行超时(%v)，文件过多，已终止", CscopeTimeout)
+		}
 		return fmt.Errorf("cscope 命令执行失败: %w, 输出: %s", err, string(output))
 	}
 
@@ -164,6 +189,24 @@ func copyFileAndReplace(src, dst, oldStr, newStr string) error {
 
 	// 写入到目标文件
 	return os.WriteFile(dst, []byte(output), 0644)
+}
+
+// countFileLines 统计文件的行数
+func countFileLines(filename string) (int, error) {
+	f, err := os.Open(filename)
+	if err != nil {
+		return 0, err
+	}
+	defer f.Close()
+
+	count := 0
+	scanner := bufio.NewScanner(f)
+	for scanner.Scan() {
+		if scanner.Text() != "" {
+			count++
+		}
+	}
+	return count, scanner.Err()
 }
 
 func replaceInFile(filename, oldStr, newStr string) error {
