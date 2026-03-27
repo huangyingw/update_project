@@ -13,7 +13,7 @@ all: clean build
 
 # 编译目标
 build:
-	go build -o update_proj -ldflags="-w" -trimpath
+	CGO_ENABLED=0 go build -o update_proj
 
 # 测试目标
 test:
