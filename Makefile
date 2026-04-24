@@ -3,6 +3,9 @@
 # 获取当前系统类型
 UNAME := $(shell uname | tr '[:upper:]' '[:lower:]')
 
+# 探测 go 绝对路径（sudo 会重置 PATH，剥掉 /usr/local/go/bin）
+GO ?= $(shell command -v go 2>/dev/null || echo /usr/local/go/bin/go)
+
 # 安装路径配置
 PREFIX ?= /usr/local
 BINDIR = $(PREFIX)/bin
@@ -13,19 +16,19 @@ all: clean build
 
 # 编译目标
 build:
-	CGO_ENABLED=0 go build -o update_proj -ldflags="-s -w" -trimpath
+	CGO_ENABLED=0 $(GO) build -o update_proj -ldflags="-s -w" -trimpath
 
 # 测试目标
 test:
-	go test -v ./...
+	$(GO) test -v ./...
 
 # 快速编译（开发中使用）
 dev:
-	go build -o update_proj
+	$(GO) build -o update_proj
 
 # 带优化的编译
 release:
-	CGO_ENABLED=0 GOOS=$(UNAME) GOARCH=amd64 go build -o update_proj -ldflags="-s -w" -trimpath
+	CGO_ENABLED=0 GOOS=$(UNAME) GOARCH=amd64 $(GO) build -o update_proj -ldflags="-s -w" -trimpath
 
 # 清理目标
 clean:
