@@ -25,6 +25,9 @@ func GenerateRsyncFiles() error {
 	if err != nil {
 		return err
 	}
+	// 额外目录(update_proj add-dir)的条目在项目根之外("../..."), rsync.files 只描述本项目,
+	// 不收它们——否则 --files-from 会把项目外的文件一并同步走
+	filesProj = utils.FilterOutsideProject(filesProj)
 
 	// 将处理后的files.proj写入临时文件
 	err = utils.WriteLinesToFile(rsyncFilesTmp, filesProj)

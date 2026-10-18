@@ -75,7 +75,7 @@ func GenerateFileIndex() error {
 	}
 
 	// 快速估算文件数量，超过阈值则跳过
-	fileCount, err := estimateFileCount(pruneParams)
+	fileCount, err := estimateFileCount(targetDir, pruneParams)
 	if err != nil {
 		fmt.Printf("WARN: 估算文件数量失败: %v，继续执行\n", err)
 	} else if fileCount > MaxFileCount {
@@ -85,33 +85,8 @@ func GenerateFileIndex() error {
 	}
 
 	// 执行find命令（带超时）
-	findCmd := buildFindCommand(pruneParams, false, tempTarget.Name(), tempError.Name())
-	fmt.Printf("INFO: 执行find命令: %s\n", findCmd)
-	ctx, cancel := context.WithTimeout(context.Background(), FindTimeout)
-	defer cancel()
-	cmd := exec.CommandContext(ctx, "sh", "-c", findCmd)
-	if err := cmd.Run(); err != nil {
-		if ctx.Err() == context.DeadlineExceeded {
-			return fmt.Errorf("find命令执行超时(%v)，目录文件过多，已终止", FindTimeout)
-		}
-		fmt.Printf("WARN: find命令执行出现错误: %v\n", err)
-		// 继续执行，不中断流程
-	}
-
-	// 如果有包含参数，执行额外的find命令（带超时）
-	if len(includeParams) > 0 {
-		includeFindCmd := buildFindCommand(includeParams, true, tempTarget.Name(), tempError.Name())
-		fmt.Printf("INFO: 执行include find命令: %s\n", includeFindCmd)
-		ctx2, cancel2 := context.WithTimeout(context.Background(), FindTimeout)
-		defer cancel2()
-		cmd = exec.CommandContext(ctx2, "sh", "-c", includeFindCmd)
-		if err := cmd.Run(); err != nil {
-			if ctx2.Err() == context.DeadlineExceeded {
-				return fmt.Errorf("include find命令执行超时(%v)，目录文件过多，已终止", FindTimeout)
-			}
-			fmt.Printf("WARN: include find命令执行出现错误: %v\n", err)
-			// 继续执行，不中断流程
-		}
+	if err := runFindInDir(targetDir, pruneParams, includeParams, tempTarget.Name(), tempError.Name()); err != nil {
+		return err
 	}
 
 	// 检查错误日志
@@ -130,7 +105,7 @@ func GenerateFileIndex() error {
 	// 使用sed处理文件路径，确保格式正确，并使用LC_ALL=C确保排序一致性
 	sedCmd := fmt.Sprintf("LC_ALL=C sed -e 's|^\\./||' -e 's|^|\"./|' -e 's|$|\"|' \"%s\" | LC_ALL=C sort -u > \"%s\"",
 		tempTarget.Name(), tempSorted.Name())
-	cmd = exec.Command("sh", "-c", sedCmd)
+	cmd := exec.Command("sh", "-c", sedCmd)
 	if err := cmd.Run(); err != nil {
 		return fmt.Errorf("处理文件路径失败: %v", err)
 	}
@@ -172,6 +147,11 @@ func GenerateFileIndex() error {
 	cmd = exec.Command("sh", "-c", cleanCmd)
 	if err := cmd.Run(); err != nil {
 		return fmt.Errorf("清理文件失败: %v", err)
+	}
+
+	// 并入 .gitconfig 里登记的额外目录(update_proj add-dir), 条目形如 "../sibling/path"
+	if err := appendExtraDirEntries(targetDir, pruneParams, includeParams, finalTarget.Name(), tempError.Name()); err != nil {
+		return err
 	}
 
 	// 验证生成的文件
@@ -272,7 +252,7 @@ func buildFindCommand(patterns []string, isInclude bool, outputFile, errorFile s
 
 // estimateFileCount 快速估算目录下的文件数量（排除 prune 目录）
 // 使用 find 配合 head 快速截断，避免遍历全部文件
-func estimateFileCount(pruneParams []string) (int, error) {
+func estimateFileCount(dir string, pruneParams []string) (int, error) {
 	var cmd strings.Builder
 	cmd.WriteString("find . ")
 
@@ -296,7 +276,9 @@ func estimateFileCount(pruneParams []string) (int, error) {
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
 
-	out, err := exec.CommandContext(ctx, "sh", "-c", cmdStr).Output()
+	countCmd := exec.CommandContext(ctx, "sh", "-c", cmdStr)
+	countCmd.Dir = dir
+	out, err := countCmd.Output()
 	if err != nil {
 		if ctx.Err() == context.DeadlineExceeded {
 			// 30秒内都无法完成计数，说明文件极多
@@ -354,4 +336,104 @@ func appendUniqueLine(filePath, line string) error {
 
 	// 写入文件
 	return os.WriteFile(filePath, []byte(strings.Join(nonEmptyLines, "\n")+"\n"), 0644)
+}
+
+// runFindInDir 在 dir 下执行 prune 规则的 find(以及 include 规则的追加 find), 输出到 outputFile。
+// 超时报错; 其他 find 错误只打 WARN 不中断。
+func runFindInDir(dir string, pruneParams, includeParams []string, outputFile, errorFile string) error {
+	findCmd := buildFindCommand(pruneParams, false, outputFile, errorFile)
+	fmt.Printf("INFO: 在 %s 执行find命令: %s\n", dir, findCmd)
+	ctx, cancel := context.WithTimeout(context.Background(), FindTimeout)
+	defer cancel()
+	cmd := exec.CommandContext(ctx, "sh", "-c", findCmd)
+	cmd.Dir = dir
+	if err := cmd.Run(); err != nil {
+		if ctx.Err() == context.DeadlineExceeded {
+			return fmt.Errorf("find命令执行超时(%v)，目录文件过多，已终止", FindTimeout)
+		}
+		fmt.Printf("WARN: find命令执行出现错误: %v\n", err)
+		// 继续执行，不中断流程
+	}
+
+	// 如果有包含参数，执行额外的find命令（带超时）
+	if len(includeParams) > 0 {
+		includeFindCmd := buildFindCommand(includeParams, true, outputFile, errorFile)
+		fmt.Printf("INFO: 在 %s 执行include find命令: %s\n", dir, includeFindCmd)
+		ctx2, cancel2 := context.WithTimeout(context.Background(), FindTimeout)
+		defer cancel2()
+		cmd = exec.CommandContext(ctx2, "sh", "-c", includeFindCmd)
+		cmd.Dir = dir
+		if err := cmd.Run(); err != nil {
+			if ctx2.Err() == context.DeadlineExceeded {
+				return fmt.Errorf("include find命令执行超时(%v)，目录文件过多，已终止", FindTimeout)
+			}
+			fmt.Printf("WARN: include find命令执行出现错误: %v\n", err)
+			// 继续执行，不中断流程
+		}
+	}
+	return nil
+}
+
+// appendExtraDirEntries 把项目根 .gitconfig 里登记的额外目录(proj.extra)扫描结果并入 finalFile。
+// 沿用主项目的 prunefix.conf / includefile.conf 规则(find 在额外目录里以 . 起步, 规则语义不变),
+// 条目写成 "<相对路径>/<文件>"(如 "../sibling/a.go"), 最后整体 LC_ALL=C sort -u。
+// 单个额外目录超过文件数阈值只跳过该目录, 不影响主目录结果。
+func appendExtraDirEntries(projectDir string, pruneParams, includeParams []string, finalFile, errorFile string) error {
+	extraDirs, err := utils.ResolveExtraDirs(projectDir)
+	if err != nil {
+		return err
+	}
+	if len(extraDirs) == 0 {
+		return nil
+	}
+
+	out, err := os.OpenFile(finalFile, os.O_APPEND|os.O_WRONLY, 0644)
+	if err != nil {
+		return fmt.Errorf("打开 %s 追加额外目录失败: %v", finalFile, err)
+	}
+	for _, extra := range extraDirs {
+		fmt.Printf("INFO: 扫描额外目录 %s (%s)\n", extra.Rel, extra.Abs)
+		fileCount, err := estimateFileCount(extra.Abs, pruneParams)
+		if err != nil {
+			fmt.Printf("WARN: 估算 %s 文件数量失败: %v，继续执行\n", extra.Rel, err)
+		} else if fileCount > MaxFileCount {
+			fmt.Printf("WARN: 额外目录 %s 文件数量(%d)超过阈值(%d)，跳过该目录\n", extra.Rel, fileCount, MaxFileCount)
+			continue
+		}
+
+		tmp, err := os.CreateTemp("", "files_proj_extra")
+		if err != nil {
+			out.Close()
+			return fmt.Errorf("创建额外目录临时文件失败: %v", err)
+		}
+		tmp.Close()
+		if err := runFindInDir(extra.Abs, pruneParams, includeParams, tmp.Name(), errorFile); err != nil {
+			os.Remove(tmp.Name())
+			out.Close()
+			return fmt.Errorf("额外目录 %s: %w", extra.Rel, err)
+		}
+		lines, err := utils.ReadFileLines(tmp.Name())
+		os.Remove(tmp.Name())
+		if err != nil {
+			out.Close()
+			return fmt.Errorf("读取额外目录 %s 的扫描结果失败: %v", extra.Rel, err)
+		}
+		for _, line := range lines {
+			entry := fmt.Sprintf("\"%s/%s\"\n", extra.Rel, strings.TrimPrefix(line, "./"))
+			if _, err := out.WriteString(entry); err != nil {
+				out.Close()
+				return fmt.Errorf("写入额外目录条目失败: %v", err)
+			}
+		}
+		fmt.Printf("INFO: 额外目录 %s 并入 %d 个文件\n", extra.Rel, len(lines))
+	}
+	if err := out.Close(); err != nil {
+		return err
+	}
+
+	sortCmd := exec.Command("sh", "-c", fmt.Sprintf("LC_ALL=C sort -u \"%s\" -o \"%s\"", finalFile, finalFile))
+	if err := sortCmd.Run(); err != nil {
+		return fmt.Errorf("合并额外目录后排序失败: %v", err)
+	}
+	return nil
 }

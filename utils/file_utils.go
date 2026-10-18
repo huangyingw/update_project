@@ -99,3 +99,15 @@ func ReadFilesProj(filename string) ([]string, error) {
 	}
 	return files, scanner.Err()
 }
+
+// FilterOutsideProject 去掉指向项目根之外的条目(以 ../ 开头, 来自 .gitconfig 登记的额外目录)
+func FilterOutsideProject(files []string) []string {
+	var kept []string
+	for _, f := range files {
+		if f == ".." || strings.HasPrefix(f, "../") {
+			continue
+		}
+		kept = append(kept, f)
+	}
+	return kept
+}
