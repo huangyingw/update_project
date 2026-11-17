@@ -20,9 +20,15 @@ const (
 )
 
 func GenerateFileIndex() error {
-	targetDir, err := os.Getwd()
+	cwd, err := os.Getwd()
 	if err != nil {
 		return fmt.Errorf("获取当前目录失败: %v", err)
+	}
+	// os.Getwd 在 $PWD 与当前目录一致时直接返回 $PWD, 从符号链接路径(如 ~/myproject → 卷上)进入时
+	// 拿到的是链接写法; 一律按实际路径记, 与 findProjects 写回 ~/all.proj 的口径一致。
+	targetDir, err := utils.RealPath(cwd)
+	if err != nil {
+		return fmt.Errorf("解析当前目录实际路径失败: %v", err)
 	}
 
 	fmt.Printf("INFO: 在目录 %s 中生成文件索引\n", targetDir)
@@ -188,7 +194,12 @@ func GenerateFileIndex() error {
 	// 更新~/all.proj
 	allProjPath := filepath.Join(os.Getenv("HOME"), "all.proj")
 	newEntry := fmt.Sprintf("\"%s/files.proj\"", targetDir)
-	if err := appendUniqueLine(allProjPath, newEntry); err != nil {
+	var staleEntries []string
+	if cwd != targetDir {
+		// 旧版本按链接写法追加过的同一项目条目, 换成实际路径时一并去掉
+		staleEntries = append(staleEntries, fmt.Sprintf("\"%s/files.proj\"", cwd))
+	}
+	if err := appendUniqueLine(allProjPath, newEntry, staleEntries...); err != nil {
 		return fmt.Errorf("更新all.proj失败: %v", err)
 	}
 
@@ -292,9 +303,8 @@ func estimateFileCount(dir string, pruneParams []string) (int, error) {
 	return count, nil
 }
 
-// 追加唯一行到文件
-func appendUniqueLine(filePath, line string) error {
-	// 检查文件是否存在
+// 追加唯一行到文件, 并删掉 stale 里列出的行(按整行精确匹配, 不逐行解析路径以免碰到死挂载卡住)
+func appendUniqueLine(filePath, line string, stale ...string) error {
 	var lines []string
 
 	if _, err := os.Stat(filePath); !os.IsNotExist(err) {
@@ -303,29 +313,41 @@ func appendUniqueLine(filePath, line string) error {
 		if err != nil {
 			return err
 		}
-
 		lines = strings.Split(string(content), "\n")
-
-		// 检查行是否已存在
-		for _, existingLine := range lines {
-			if existingLine == line {
-				return nil // 行已存在，不需要添加
-			}
-		}
 	}
 
-	// 添加新行
-	lines = append(lines, line)
+	staleSet := make(map[string]bool, len(stale))
+	for _, s := range stale {
+		if s != line {
+			staleSet[s] = true
+		}
+	}
+	found, removed := false, false
+	var kept []string
+	for _, l := range lines {
+		if staleSet[l] {
+			removed = true
+			continue
+		}
+		if l == line {
+			found = true
+		}
+		kept = append(kept, l)
+	}
+	if found && !removed {
+		return nil // 行已存在且没有要删的旧行，不需要改写
+	}
+	if !found {
+		kept = append(kept, line)
+	}
 
 	// 过滤空行并排序
 	var nonEmptyLines []string
-	for _, l := range lines {
+	for _, l := range kept {
 		if l != "" {
 			nonEmptyLines = append(nonEmptyLines, l)
 		}
 	}
-
-	// 排序
 	sort.Strings(nonEmptyLines)
 
 	// 确保目录存在

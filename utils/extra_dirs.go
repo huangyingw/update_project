@@ -54,7 +54,7 @@ func ResolveExtraDirs(projectDir string) ([]ExtraDir, error) {
 		return nil, err
 	}
 	// 相对路径是按真实路径(符号链接解析后)算出来的, 解析时也按真实路径拼, 两边口径一致
-	projectReal, err := realPath(projectDir)
+	projectReal, err := RealPath(projectDir)
 	if err != nil {
 		return nil, err
 	}
@@ -83,11 +83,11 @@ func NormalizeExtraDir(projectDir, input string) (string, error) {
 	}
 	// 两边都解析成真实路径再算相对路径: 用户 cwd 或传入路径经过符号链接(macOS 的 /var → /private/var,
 	// ~/Dropbox 之类)时, 单纯的 Abs 会算出一长串 ../, 存进配置就失去意义了
-	projectAbs, err := realPath(projectDir)
+	projectAbs, err := RealPath(projectDir)
 	if err != nil {
 		return "", err
 	}
-	dirAbs, err := realPath(input)
+	dirAbs, err := RealPath(input)
 	if err != nil {
 		return "", err
 	}
@@ -144,8 +144,8 @@ func CommitExtraDirConfig(projectDir string, added []string) (bool, error) {
 	return true, nil
 }
 
-// realPath 返回绝对且解析过符号链接的路径
-func realPath(path string) (string, error) {
+// RealPath 返回绝对且解析过符号链接的路径
+func RealPath(path string) (string, error) {
 	abs, err := filepath.Abs(path)
 	if err != nil {
 		return "", err

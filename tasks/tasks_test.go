@@ -2,10 +2,17 @@ package tasks
 
 import (
 	"os"
+	"path/filepath"
 	"testing"
 )
 
 func TestGenerateFileIndex(t *testing.T) {
+	// 隔离 ~/all.proj, 不往真实索引里追加测试目录; 配置模板仍取真实 ~/loadrc 下的
+	home := t.TempDir()
+	if err := os.Symlink(filepath.Join(os.Getenv("HOME"), "loadrc"), filepath.Join(home, "loadrc")); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("HOME", home)
 	// 创建临时的 files.proj
 	err := os.WriteFile("files.proj", []byte("\"testfile.go\"\n"), 0644)
 	if err != nil {
