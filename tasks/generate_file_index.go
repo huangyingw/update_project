@@ -159,7 +159,7 @@ func GenerateFileIndex() error {
 	if err := appendExtraDirEntries(targetDir, pruneParams, includeParams, finalTarget.Name(), tempError.Name()); err != nil {
 		return err
 	}
-	// 并入 .proj.local 里登记的本机单个文件(update_proj add-file), 条目是绝对路径
+	// 并入登记的单个文件(.gitconfig 的 proj.file / proj.<分支>.file, .proj.local), 条目是绝对路径
 	if err := appendExtraFileEntries(targetDir, finalTarget.Name()); err != nil {
 		return err
 	}
@@ -464,7 +464,7 @@ func appendExtraDirEntries(projectDir string, pruneParams, includeParams []strin
 	return nil
 }
 
-// appendExtraFileEntries 把项目根 .proj.local 登记的单个文件(只属于本机, 不入库)以绝对路径并入 finalFile,
+// appendExtraFileEntries 把登记的单个文件(见 utils.ReadAllExtraFiles)以绝对路径并入 finalFile,
 // 再整体 LC_ALL=C sort -u。这些文件不受 prunefix / includefile 规则约束——是逐个点名登记的。
 func appendExtraFileEntries(projectDir, finalFile string) error {
 	files, err := utils.ResolveExtraFiles(projectDir)
@@ -487,7 +487,7 @@ func appendExtraFileEntries(projectDir, finalFile string) error {
 	if err := out.Close(); err != nil {
 		return err
 	}
-	fmt.Printf("INFO: 并入 %s 登记的 %d 个文件\n", utils.LocalConfigFile, len(files))
+	fmt.Printf("INFO: 并入登记的 %d 个单个文件\n", len(files))
 
 	sortCmd := exec.Command("sh", "-c", fmt.Sprintf("LC_ALL=C sort -u \"%s\" -o \"%s\"", finalFile, finalFile))
 	if err := sortCmd.Run(); err != nil {

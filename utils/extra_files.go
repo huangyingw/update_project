@@ -14,23 +14,22 @@ import (
 const (
 	// LocalConfigFile 是项目根下只属于本机检出的配置文件(git config 格式, 不提交; add-file 会把它写进 info/exclude)
 	LocalConfigFile = ".proj.local"
-	// ExtraFileConfigKey 是 .proj.local 里的多值键: [proj] file = <绝对路径 / ~/路径 / 通配>
+	// ExtraFileConfigKey 是登记单个文件的多值键: [proj] file = <绝对路径 / ~/路径 / 通配>;
+	// 可写在 .proj.local(本机)或入库的 .gitconfig(所有检出; [proj "<分支>"] 子节则只对该分支), 见 ReadAllExtraFiles
 	ExtraFileConfigKey = "proj.file"
 )
 
-// ReadExtraFiles 读取项目根 .proj.local 里登记的单个文件(原样返回, 不展开不校验)。
-// 配置文件或键不存在 → 空切片, 不报错。
-func ReadExtraFiles(projectDir string) ([]string, error) {
-	configPath := filepath.Join(projectDir, LocalConfigFile)
+// readMultiValue 读 git config 格式文件里的多值键; 文件或键不存在 → 空切片, 不报错
+func readMultiValue(configPath, key string) ([]string, error) {
 	if _, err := os.Stat(configPath); os.IsNotExist(err) {
 		return nil, nil
 	}
-	out, err := exec.Command("git", "config", "--file", configPath, "--get-all", ExtraFileConfigKey).Output()
+	out, err := exec.Command("git", "config", "--file", configPath, "--get-all", key).Output()
 	if err != nil {
 		if exitErr, ok := err.(*exec.ExitError); ok && exitErr.ExitCode() == 1 {
 			return nil, nil
 		}
-		return nil, fmt.Errorf("读取 %s 的 %s 失败: %w", configPath, ExtraFileConfigKey, err)
+		return nil, fmt.Errorf("读取 %s 的 %s 失败: %w", configPath, key, err)
 	}
 	var values []string
 	for _, line := range strings.Split(string(out), "\n") {
@@ -39,6 +38,53 @@ func ReadExtraFiles(projectDir string) ([]string, error) {
 		}
 	}
 	return values, nil
+}
+
+// ReadExtraFiles 读取项目根 .proj.local 里登记的单个文件(原样返回, 不展开不校验)。
+func ReadExtraFiles(projectDir string) ([]string, error) {
+	return readMultiValue(filepath.Join(projectDir, LocalConfigFile), ExtraFileConfigKey)
+}
+
+// currentBranch 返回项目所在检出的当前分支名; 不是 git 仓库或游离 HEAD → ""
+func currentBranch(projectDir string) string {
+	cmd := exec.Command("git", "symbolic-ref", "--quiet", "--short", "HEAD")
+	cmd.Dir = projectDir
+	out, err := cmd.Output()
+	if err != nil {
+		return ""
+	}
+	return strings.TrimSpace(string(out))
+}
+
+// ReadAllExtraFiles 汇总三处登记(原样返回, 不展开不校验):
+//   - 入库的 .gitconfig 里 [proj] file = …              —— 这个仓库的所有检出都收
+//   - 入库的 .gitconfig 里 [proj "<分支>"] file = …      —— 只有当前分支是 <分支> 的检出收(如塔台 tower)
+//   - 不入库的 .proj.local 里 [proj] file = …           —— 只有本机这个检出收
+//
+// 入库的两种随 git 同步到各机, 路径要写 ~/ 开头才能在 macOS 与 Linux 上都对。
+func ReadAllExtraFiles(projectDir string) ([]string, error) {
+	tracked := filepath.Join(projectDir, ExtraDirConfigFile)
+	values, err := readMultiValue(tracked, ExtraFileConfigKey)
+	if err != nil {
+		return nil, err
+	}
+	if branch := currentBranch(projectDir); branch != "" {
+		v, err := readMultiValue(tracked, BranchExtraFileConfigKey(branch))
+		if err != nil {
+			return nil, err
+		}
+		values = append(values, v...)
+	}
+	local, err := ReadExtraFiles(projectDir)
+	if err != nil {
+		return nil, err
+	}
+	return append(values, local...), nil
+}
+
+// BranchExtraFileConfigKey 是只对某个分支生效的键: proj.<分支>.file(分支名作 git config 子节, 可含 /)
+func BranchExtraFileConfigKey(branch string) string {
+	return "proj." + branch + ".file"
 }
 
 // expandHome 把开头的 ~ 换成 $HOME
@@ -71,11 +117,11 @@ func isTextFile(path string) bool {
 	return !bytes.Contains(buf[:n], []byte{0})
 }
 
-// ResolveExtraFiles 把 .proj.local 登记的值展开成文件绝对路径(展开 ~ 与通配), 去重排序。
+// ResolveExtraFiles 把各处登记的单个文件(见 ReadAllExtraFiles)展开成绝对路径(展开 ~ 与通配), 去重排序。
 // 不存在 / 通配没匹配 / 不是普通文件 / 不是文本文件的条目打 WARN 后跳过, 不报错——
 // 登记的多是别的程序定时重写的文件, 偶尔不在不应让整个索引失败。
 func ResolveExtraFiles(projectDir string) ([]string, error) {
-	values, err := ReadExtraFiles(projectDir)
+	values, err := ReadAllExtraFiles(projectDir)
 	if err != nil {
 		return nil, err
 	}
@@ -84,7 +130,7 @@ func ResolveExtraFiles(projectDir string) ([]string, error) {
 	for _, v := range values {
 		p := expandHome(v)
 		if !filepath.IsAbs(p) {
-			fmt.Printf("WARN: %s 里的 %s = %s 不是绝对路径(或 ~/ 开头), 跳过\n", LocalConfigFile, ExtraFileConfigKey, v)
+			fmt.Printf("WARN: 登记的单个文件 %s 不是绝对路径(或 ~/ 开头), 跳过\n", v)
 			continue
 		}
 		p = filepath.Clean(p)

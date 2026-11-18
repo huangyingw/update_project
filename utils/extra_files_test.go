@@ -133,3 +133,74 @@ func TestEnsureLocalConfigExcluded(t *testing.T) {
 		t.Errorf("%s 应被忽略, git status: %s", LocalConfigFile, out)
 	}
 }
+
+// 入库 .gitconfig: [proj] file 所有检出都收; [proj "tower"] file 只有当前分支是 tower 的检出收;
+// .proj.local 与之叠加去重。
+func TestResolveExtraFilesTrackedBranchScoped(t *testing.T) {
+	root := t.TempDir()
+	home := filepath.Join(root, "home")
+	t.Setenv("HOME", home)
+	t.Setenv("GIT_CONFIG_GLOBAL", "/dev/null")
+	t.Setenv("GIT_CONFIG_SYSTEM", "/dev/null")
+	cache := filepath.Join(home, ".cache", "tower")
+	for _, f := range []string{"shared.md", "reminders.md", "todo-self.md", "todo-action.md", "local.md"} {
+		writeFile(t, filepath.Join(cache, f), f+"\n")
+	}
+	repo := filepath.Join(root, "repo")
+	if err := os.MkdirAll(repo, 0755); err != nil {
+		t.Fatal(err)
+	}
+	git := func(args ...string) {
+		t.Helper()
+		if out, err := exec.Command("git", append([]string{"-C", repo}, args...)...).CombinedOutput(); err != nil {
+			t.Fatalf("git %v: %v %s", args, err, out)
+		}
+	}
+	git("init", "-q", "-b", "tower")
+	cfg := filepath.Join(repo, ExtraDirConfigFile)
+	for _, kv := range [][2]string{
+		{ExtraFileConfigKey, "~/.cache/tower/shared.md"},
+		{BranchExtraFileConfigKey("tower"), "~/.cache/tower/reminders.md"},
+		{BranchExtraFileConfigKey("tower"), "~/.cache/tower/todo-*.md"},
+		{BranchExtraFileConfigKey("feature/x"), "~/.cache/tower/local.md"},
+	} {
+		if out, err := exec.Command("git", "config", "--file", cfg, "--add", kv[0], kv[1]).CombinedOutput(); err != nil {
+			t.Fatalf("写 .gitconfig: %v %s", err, out)
+		}
+	}
+	if _, err := AddExtraFile(repo, filepath.Join(cache, "local.md")); err != nil {
+		t.Fatal(err)
+	}
+	p := func(f string) string { return filepath.Join(cache, f) }
+
+	got, err := ResolveExtraFiles(repo)
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := []string{p("local.md"), p("reminders.md"), p("shared.md"), p("todo-action.md"), p("todo-self.md")}
+	if !reflect.DeepEqual(got, want) {
+		t.Errorf("tower 分支:\n got %v\nwant %v", got, want)
+	}
+
+	// 换到别的分支: tower 子节不收, feature/x 子节收
+	git("symbolic-ref", "HEAD", "refs/heads/feature/x")
+	got, err = ResolveExtraFiles(repo)
+	if err != nil {
+		t.Fatal(err)
+	}
+	want = []string{p("local.md"), p("shared.md")}
+	if !reflect.DeepEqual(got, want) {
+		t.Errorf("feature/x 分支:\n got %v\nwant %v", got, want)
+	}
+
+	// 不是 git 仓库: 只收不带分支的与 .proj.local
+	plain := filepath.Join(root, "plain")
+	writeFile(t, filepath.Join(plain, ExtraDirConfigFile), "[proj \"tower\"]\n\tfile = ~/.cache/tower/reminders.md\n[proj]\n\tfile = ~/.cache/tower/shared.md\n")
+	got, err = ResolveExtraFiles(plain)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !reflect.DeepEqual(got, []string{p("shared.md")}) {
+		t.Errorf("非 git 目录 got %v", got)
+	}
+}
