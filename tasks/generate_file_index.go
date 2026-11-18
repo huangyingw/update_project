@@ -159,6 +159,10 @@ func GenerateFileIndex() error {
 	if err := appendExtraDirEntries(targetDir, pruneParams, includeParams, finalTarget.Name(), tempError.Name()); err != nil {
 		return err
 	}
+	// 并入 .proj.local 里登记的本机单个文件(update_proj add-file), 条目是绝对路径
+	if err := appendExtraFileEntries(targetDir, finalTarget.Name()); err != nil {
+		return err
+	}
 
 	// 验证生成的文件
 	finalInfo, err := os.Stat(finalTarget.Name())
@@ -456,6 +460,38 @@ func appendExtraDirEntries(projectDir string, pruneParams, includeParams []strin
 	sortCmd := exec.Command("sh", "-c", fmt.Sprintf("LC_ALL=C sort -u \"%s\" -o \"%s\"", finalFile, finalFile))
 	if err := sortCmd.Run(); err != nil {
 		return fmt.Errorf("合并额外目录后排序失败: %v", err)
+	}
+	return nil
+}
+
+// appendExtraFileEntries 把项目根 .proj.local 登记的单个文件(只属于本机, 不入库)以绝对路径并入 finalFile,
+// 再整体 LC_ALL=C sort -u。这些文件不受 prunefix / includefile 规则约束——是逐个点名登记的。
+func appendExtraFileEntries(projectDir, finalFile string) error {
+	files, err := utils.ResolveExtraFiles(projectDir)
+	if err != nil {
+		return err
+	}
+	if len(files) == 0 {
+		return nil
+	}
+	out, err := os.OpenFile(finalFile, os.O_APPEND|os.O_WRONLY, 0644)
+	if err != nil {
+		return fmt.Errorf("打开 %s 追加登记文件失败: %v", finalFile, err)
+	}
+	for _, f := range files {
+		if _, err := out.WriteString(fmt.Sprintf("\"%s\"\n", f)); err != nil {
+			out.Close()
+			return fmt.Errorf("写入登记文件条目失败: %v", err)
+		}
+	}
+	if err := out.Close(); err != nil {
+		return err
+	}
+	fmt.Printf("INFO: 并入 %s 登记的 %d 个文件\n", utils.LocalConfigFile, len(files))
+
+	sortCmd := exec.Command("sh", "-c", fmt.Sprintf("LC_ALL=C sort -u \"%s\" -o \"%s\"", finalFile, finalFile))
+	if err := sortCmd.Run(); err != nil {
+		return fmt.Errorf("合并登记文件后排序失败: %v", err)
 	}
 	return nil
 }

@@ -114,7 +114,7 @@ func TestReadAddResolveExtraDirs(t *testing.T) {
 }
 
 func TestFilterOutsideProject(t *testing.T) {
-	in := []string{"./a.go", "..", "../sibling/b.go", "..hidden/c.go", "sub/../d.go"}
+	in := []string{"./a.go", "..", "../sibling/b.go", "..hidden/c.go", "sub/../d.go", "/home/u/.cache/x.md"}
 	want := []string{"./a.go", "..hidden/c.go", "sub/../d.go"}
 	if got := FilterOutsideProject(in); !reflect.DeepEqual(got, want) {
 		t.Errorf("got %v, want %v", got, want)
